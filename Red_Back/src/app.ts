@@ -12,7 +12,7 @@ export function createApp() {
   app.use('/api/profiles', profilesRouter);
   app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
     if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
-      response.status(413).json({ message: 'El PDF no puede superar 5 MB' });
+      response.status(413).json({ message: 'El archivo no puede superar 5 MB' });
       return;
     }
     console.error(error);

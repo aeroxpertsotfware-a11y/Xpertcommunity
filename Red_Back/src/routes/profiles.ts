@@ -10,6 +10,21 @@ const upload = multer({
     callback(null, file.mimetype === 'application/pdf');
   },
 });
+const imageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_request, file, callback) => {
+    callback(null, ['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype));
+  },
+});
+
+const safeProjection = {
+  'documents.resume.data': 0,
+  'documents.cipu.data': 0,
+  'images.avatar.data': 0,
+  'images.cover.data': 0,
+  'images.story.data': 0,
+};
 
 const defaultProfile = (userId: string) => ({
   userId,
@@ -30,7 +45,7 @@ router.get('/:userId', async (request, response, next) => {
     const db = await connectMongo();
     const profile = await db.collection('pilot_profiles').findOne(
       { userId: request.params.userId },
-      { projection: { 'documents.resume.data': 0, 'documents.cipu.data': 0 } },
+      { projection: safeProjection },
     );
     response.json(profile ?? defaultProfile(request.params.userId));
   } catch (error) {
@@ -64,7 +79,7 @@ router.put('/:userId', async (request, response, next) => {
       updatedAt: new Date(),
     };
     const db = await connectMongo();
-    await db.collection('pilot_profiles').updateOne(
+    await db.collection<any>('pilot_profiles').updateOne(
       { userId: request.params.userId },
       {
         $set: update,
@@ -79,7 +94,7 @@ router.put('/:userId', async (request, response, next) => {
     );
     const profile = await db.collection('pilot_profiles').findOne(
       { userId: request.params.userId },
-      { projection: { 'documents.resume.data': 0, 'documents.cipu.data': 0 } },
+      { projection: safeProjection },
     );
     response.json(profile);
   } catch (error) {
@@ -157,6 +172,119 @@ router.get('/:userId/documents/:type', async (request, response, next) => {
       `inline; filename="${String(document.name).replaceAll('"', '')}"`,
     );
     response.send(document.data.buffer);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post(
+  '/:userId/images/:type',
+  imageUpload.single('image'),
+  async (request, response, next) => {
+    try {
+      const type = request.params.type;
+      if (!['avatar', 'cover', 'story'].includes(type)) {
+        response.status(400).json({ message: 'Tipo de imagen no válido' });
+        return;
+      }
+      if (!request.file) {
+        response.status(400).json({ message: 'Selecciona una imagen JPG, PNG o WEBP' });
+        return;
+      }
+      const image = {
+        name: request.file.originalname.slice(0, 160),
+        mimeType: request.file.mimetype,
+        size: request.file.size,
+        uploadedAt: new Date(),
+        data: request.file.buffer,
+      };
+      const db = await connectMongo();
+      await db.collection('pilot_profiles').updateOne(
+        { userId: request.params.userId },
+        {
+          $set: { [`images.${type}`]: image, updatedAt: new Date() },
+          $setOnInsert: {
+            userId: request.params.userId,
+            followers: 0,
+            following: 0,
+            createdAt: new Date(),
+          },
+        },
+        { upsert: true },
+      );
+      const { data: _data, ...metadata } = image;
+      response.status(201).json(metadata);
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+router.get('/:userId/images/:type', async (request, response, next) => {
+  try {
+    const type = request.params.type;
+    if (!['avatar', 'cover', 'story'].includes(type)) {
+      response.status(400).json({ message: 'Tipo de imagen no válido' });
+      return;
+    }
+    const db = await connectMongo();
+    const profile = await db.collection('pilot_profiles').findOne(
+      { userId: request.params.userId },
+      { projection: { [`images.${type}`]: 1 } },
+    );
+    const image = (profile?.images as Record<string, any> | undefined)?.[type];
+    if (!image?.data) {
+      response.status(404).json({ message: 'Imagen no encontrada' });
+      return;
+    }
+    response.setHeader('Content-Type', image.mimeType);
+    response.setHeader('Cache-Control', 'public, max-age=3600');
+    response.send(image.data.buffer);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/:userId/posts', async (request, response, next) => {
+  try {
+    const content =
+      typeof request.body.content === 'string'
+        ? request.body.content.trim().slice(0, 2000)
+        : '';
+    if (!content) {
+      response.status(400).json({ message: 'La publicación no puede estar vacía' });
+      return;
+    }
+    const post = {
+      id: crypto.randomUUID(),
+      content,
+      createdAt: new Date(),
+      likes: 0,
+      comments: 0,
+    };
+    const db = await connectMongo();
+    await db.collection('pilot_profiles').updateOne(
+      { userId: request.params.userId },
+      [
+        {
+          $set: {
+            userId: request.params.userId,
+            posts: {
+              $slice: [
+                { $concatArrays: [[post], { $ifNull: ['$posts', []] }] },
+                50,
+              ],
+            },
+            followers: { $ifNull: ['$followers', 0] },
+            following: { $ifNull: ['$following', 0] },
+            createdAt: { $ifNull: ['$createdAt', new Date()] },
+            updatedAt: new Date(),
+          },
+        },
+      ],
+      { upsert: true },
+    );
+    response.status(201).json(post);
   } catch (error) {
     next(error);
   }
