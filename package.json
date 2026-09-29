@@ -1,0 +1,12 @@
+{
+  "name": "xpertcommunity-deploy",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "npm --prefix Red_Back ci && npm --prefix Red_Back run build",
+    "start": "npm --prefix Red_Back start"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
