@@ -38,6 +38,36 @@ const defaultProfile = (userId: string) => ({
   followers: 0,
   following: 0,
   documents: {},
+  presence: {
+    isOnline: false,
+    lastSeen: null,
+  },
+});
+
+router.post('/:userId/presence', async (request, response, next) => {
+  try {
+    const isOnline = request.body?.isOnline === true;
+    const now = new Date();
+    const db = await connectMongo();
+    await db.collection('pilot_profiles').updateOne(
+      { userId: request.params.userId },
+      {
+        $set: {
+          presence: { isOnline, lastSeen: now },
+        },
+        $setOnInsert: {
+          userId: request.params.userId,
+          followers: 0,
+          following: 0,
+          createdAt: now,
+        },
+      },
+      { upsert: true },
+    );
+    response.json({ isOnline, lastSeen: now });
+  } catch (error) {
+    next(error);
+  }
 });
 
 router.get('/:userId', async (request, response, next) => {
