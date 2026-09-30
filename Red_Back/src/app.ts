@@ -14,6 +14,8 @@ export function createApp() {
     if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
       const limit = request.path.includes('/story')
         ? 50
+        : request.path.includes('/posts')
+          ? 10
         : request.path.includes('/documents/')
           ? 15
           : 5;

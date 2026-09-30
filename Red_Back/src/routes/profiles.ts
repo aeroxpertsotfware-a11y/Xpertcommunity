@@ -30,6 +30,13 @@ const storyUpload = multer({
     );
   },
 });
+const postUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_request, file, callback) => {
+    callback(null, ['image/jpeg', 'image/png', 'image/webp'].includes(file.mimetype));
+  },
+});
 
 const safeProjection = {
   'documents.resume.data': 0,
@@ -105,6 +112,134 @@ router.get('/stories/active', async (_request, response, next) => {
       )
       .toArray();
     response.json(profiles);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/posts/feed', async (request, response, next) => {
+  try {
+    const viewerId = typeof request.query.viewerId === 'string'
+      ? request.query.viewerId
+      : '';
+    const db = await connectMongo();
+    const posts = await db
+      .collection('community_posts')
+      .find({})
+      .sort({ createdAt: -1 })
+      .limit(60)
+      .toArray();
+    const authorIds = [...new Set(posts.map((post) => post.userId))];
+    const authors = await db
+      .collection('pilot_profiles')
+      .find(
+        { userId: { $in: authorIds } },
+        {
+          projection: {
+            userId: 1,
+            name: 1,
+            username: 1,
+            'images.avatar.name': 1,
+            'images.avatar.uploadedAt': 1,
+          },
+        },
+      )
+      .toArray();
+    const authorMap = new Map(authors.map((author) => [author.userId, author]));
+    response.json(posts.map((post) => ({
+      id: post.id,
+      userId: post.userId,
+      content: post.content,
+      createdAt: post.createdAt,
+      hasImage: post.hasImage === true,
+      likes: Array.isArray(post.likes) ? post.likes.length : 0,
+      comments: Array.isArray(post.comments) ? post.comments.length : 0,
+      reposts: Array.isArray(post.reposts) ? post.reposts.length : 0,
+      liked: Array.isArray(post.likes) && post.likes.includes(viewerId),
+      author: authorMap.get(post.userId) ?? null,
+    })));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/posts/:postId/media', async (request, response, next) => {
+  try {
+    const db = await connectMongo();
+    const file = await db.collection('post_media.files').findOne({
+      'metadata.postId': request.params.postId,
+    });
+    if (!file) {
+      response.status(404).json({ message: 'Imagen no encontrada' });
+      return;
+    }
+    response.setHeader('Content-Type', file.contentType || 'image/jpeg');
+    response.setHeader('Cache-Control', 'public, max-age=3600');
+    new GridFSBucket(db, { bucketName: 'post_media' })
+      .openDownloadStream(file._id)
+      .on('error', next)
+      .pipe(response);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/posts/:postId/like', async (request, response, next) => {
+  try {
+    const userId = typeof request.body?.userId === 'string' ? request.body.userId : '';
+    if (!userId) {
+      response.status(400).json({ message: 'Falta el usuario' });
+      return;
+    }
+    const db = await connectMongo();
+    const post = await db.collection('community_posts').findOne({ id: request.params.postId });
+    const liked = Array.isArray(post?.likes) && post.likes.includes(userId);
+    await db.collection('community_posts').updateOne(
+      { id: request.params.postId },
+      liked ? { $pull: { likes: userId } } : { $addToSet: { likes: userId } },
+    );
+    const updated = await db.collection('community_posts').findOne({ id: request.params.postId });
+    response.json({ liked: !liked, likes: Array.isArray(updated?.likes) ? updated.likes.length : 0 });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/posts/:postId/comments', async (request, response, next) => {
+  try {
+    const userId = typeof request.body?.userId === 'string' ? request.body.userId : '';
+    const content = typeof request.body?.content === 'string'
+      ? request.body.content.trim().slice(0, 500)
+      : '';
+    if (!userId || !content) {
+      response.status(400).json({ message: 'Comentario no válido' });
+      return;
+    }
+    const comment = { id: crypto.randomUUID(), userId, content, createdAt: new Date() };
+    await (await connectMongo()).collection('community_posts').updateOne(
+      { id: request.params.postId },
+      { $push: { comments: comment } },
+    );
+    response.status(201).json(comment);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/posts/:postId/repost', async (request, response, next) => {
+  try {
+    const userId = typeof request.body?.userId === 'string' ? request.body.userId : '';
+    if (!userId) {
+      response.status(400).json({ message: 'Falta el usuario' });
+      return;
+    }
+    const db = await connectMongo();
+    await db.collection('community_posts').updateOne(
+      { id: request.params.postId },
+      { $addToSet: { reposts: userId } },
+    );
+    const post = await db.collection('community_posts').findOne({ id: request.params.postId });
+    response.json({ reposts: Array.isArray(post?.reposts) ? post.reposts.length : 0 });
   } catch (error) {
     next(error);
   }
@@ -523,24 +658,43 @@ router.get('/:userId/images/:type', async (request, response, next) => {
   }
 });
 
-router.post('/:userId/posts', async (request, response, next) => {
+router.post('/:userId/posts', postUpload.single('image'), async (request, response, next) => {
   try {
     const content =
       typeof request.body.content === 'string'
         ? request.body.content.trim().slice(0, 2000)
         : '';
-    if (!content) {
+    if (!content && !request.file) {
       response.status(400).json({ message: 'La publicación no puede estar vacía' });
       return;
     }
     const post = {
       id: crypto.randomUUID(),
+      userId: request.params.userId,
       content,
       createdAt: new Date(),
-      likes: 0,
-      comments: 0,
+      hasImage: Boolean(request.file),
+      likes: [] as string[],
+      comments: [] as Array<Record<string, unknown>>,
+      reposts: [] as string[],
     };
     const db = await connectMongo();
+    if (request.file) {
+      const bucket = new GridFSBucket(db, { bucketName: 'post_media' });
+      const stream = bucket.openUploadStream(
+        request.file.originalname.slice(0, 160),
+        {
+          contentType: request.file.mimetype,
+          metadata: { postId: post.id, userId: request.params.userId },
+        },
+      );
+      await new Promise<void>((resolve, reject) => {
+        stream.once('error', reject);
+        stream.once('finish', () => resolve());
+        Readable.from(request.file!.buffer).pipe(stream);
+      });
+    }
+    await db.collection('community_posts').insertOne(post);
     await db.collection('pilot_profiles').updateOne(
       { userId: request.params.userId },
       [
@@ -549,7 +703,19 @@ router.post('/:userId/posts', async (request, response, next) => {
             userId: request.params.userId,
             posts: {
               $slice: [
-                { $concatArrays: [[post], { $ifNull: ['$posts', []] }] },
+                {
+                  $concatArrays: [
+                    [
+                      {
+                        id: post.id,
+                        content: post.content,
+                        createdAt: post.createdAt,
+                        hasImage: post.hasImage,
+                      },
+                    ],
+                    { $ifNull: ['$posts', []] },
+                  ],
+                },
                 50,
               ],
             },
