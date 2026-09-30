@@ -10,9 +10,14 @@ export function createApp() {
     response.json({ status: 'ok' });
   });
   app.use('/api/profiles', profilesRouter);
-  app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
+  app.use((error: unknown, request: express.Request, response: express.Response, _next: express.NextFunction) => {
     if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
-      response.status(413).json({ message: 'El archivo no puede superar 5 MB' });
+      const limit = request.path.includes('/story')
+        ? 50
+        : request.path.includes('/documents/')
+          ? 15
+          : 5;
+      response.status(413).json({ message: `El archivo no puede superar ${limit} MB` });
       return;
     }
     console.error(error);
