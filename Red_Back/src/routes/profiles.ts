@@ -83,6 +83,33 @@ router.post('/:userId/presence', async (request, response, next) => {
   }
 });
 
+router.get('/stories/active', async (_request, response, next) => {
+  try {
+    const db = await connectMongo();
+    const profiles = await db
+      .collection('pilot_profiles')
+      .find(
+        { 'story.expiresAt': { $gt: new Date() } },
+        {
+          projection: {
+            userId: 1,
+            name: 1,
+            username: 1,
+            story: 1,
+            'images.avatar.name': 1,
+            'images.avatar.uploadedAt': 1,
+          },
+          sort: { 'story.uploadedAt': -1 },
+          limit: 30,
+        },
+      )
+      .toArray();
+    response.json(profiles);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/:userId', async (request, response, next) => {
   try {
     const db = await connectMongo();
@@ -399,6 +426,30 @@ router.post('/:userId/story/reaction', async (request, response, next) => {
       { upsert: true },
     );
     response.json({ emoji });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete('/:userId/story', async (request, response, next) => {
+  try {
+    const db = await connectMongo();
+    const bucket = new GridFSBucket(db, { bucketName: 'pilot_stories' });
+    const files = await db
+      .collection('pilot_stories.files')
+      .find({ 'metadata.userId': request.params.userId })
+      .project({ _id: 1 })
+      .toArray();
+    await Promise.all([
+      ...files.map(({ _id }) => bucket.delete(_id).catch(() => undefined)),
+      db.collection('pilot_profiles').updateOne(
+        { userId: request.params.userId },
+        { $unset: { story: '' } },
+      ),
+      db.collection('story_views').deleteMany({ ownerId: request.params.userId }),
+      db.collection('story_reactions').deleteMany({ ownerId: request.params.userId }),
+    ]);
+    response.status(204).send();
   } catch (error) {
     next(error);
   }
