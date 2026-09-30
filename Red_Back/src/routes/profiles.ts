@@ -216,9 +216,9 @@ router.post('/posts/:postId/comments', async (request, response, next) => {
       return;
     }
     const comment = { id: crypto.randomUUID(), userId, content, createdAt: new Date() };
-    await (await connectMongo()).collection('community_posts').updateOne(
+    await (await connectMongo()).collection<any>('community_posts').updateOne(
       { id: request.params.postId },
-      { $push: { comments: comment } },
+      { $push: { comments: comment } } as any,
     );
     response.status(201).json(comment);
   } catch (error) {
@@ -252,7 +252,29 @@ router.get('/:userId', async (request, response, next) => {
       { userId: request.params.userId },
       { projection: safeProjection },
     );
-    response.json(profile ?? defaultProfile(request.params.userId));
+    if (!profile) {
+      response.json(defaultProfile(request.params.userId));
+      return;
+    }
+    const posts = await db
+      .collection('community_posts')
+      .find({ userId: request.params.userId })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .toArray();
+    response.json({
+      ...profile,
+      posts: posts.map((post) => ({
+        id: post.id,
+        content: post.content,
+        createdAt: post.createdAt,
+        hasImage: post.hasImage === true,
+        likes: Array.isArray(post.likes) ? post.likes.length : 0,
+        comments: Array.isArray(post.comments) ? post.comments.length : 0,
+        reposts: Array.isArray(post.reposts) ? post.reposts.length : 0,
+        liked: Array.isArray(post.likes) && post.likes.includes(request.params.userId),
+      })),
+    });
   } catch (error) {
     next(error);
   }
