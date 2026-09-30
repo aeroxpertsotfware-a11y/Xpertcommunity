@@ -156,6 +156,7 @@ router.get('/posts/feed', async (request, response, next) => {
       comments: Array.isArray(post.comments) ? post.comments.length : 0,
       reposts: Array.isArray(post.reposts) ? post.reposts.length : 0,
       liked: Array.isArray(post.likes) && post.likes.includes(viewerId),
+      reposted: Array.isArray(post.reposts) && post.reposts.includes(viewerId),
       author: authorMap.get(post.userId) ?? null,
     })));
   } catch (error) {
@@ -226,6 +227,29 @@ router.post('/posts/:postId/comments', async (request, response, next) => {
   }
 });
 
+router.get('/posts/:postId/comments', async (request, response, next) => {
+  try {
+    const db = await connectMongo();
+    const post = await db.collection('community_posts').findOne(
+      { id: request.params.postId },
+      { projection: { comments: 1 } },
+    );
+    const comments = Array.isArray(post?.comments) ? post.comments : [];
+    const userIds = [...new Set(comments.map((comment) => comment.userId))];
+    const authors = await db.collection('pilot_profiles').find(
+      { userId: { $in: userIds } },
+      { projection: { userId: 1, name: 1, username: 1, 'images.avatar.uploadedAt': 1 } },
+    ).toArray();
+    const authorMap = new Map(authors.map((author) => [author.userId, author]));
+    response.json(comments.map((comment) => ({
+      ...comment,
+      author: authorMap.get(comment.userId) ?? null,
+    })));
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post('/posts/:postId/repost', async (request, response, next) => {
   try {
     const userId = typeof request.body?.userId === 'string' ? request.body.userId : '';
@@ -234,12 +258,19 @@ router.post('/posts/:postId/repost', async (request, response, next) => {
       return;
     }
     const db = await connectMongo();
+    const current = await db.collection('community_posts').findOne({ id: request.params.postId });
+    const reposted = Array.isArray(current?.reposts) && current.reposts.includes(userId);
     await db.collection('community_posts').updateOne(
       { id: request.params.postId },
-      { $addToSet: { reposts: userId } },
+      reposted
+        ? { $pull: { reposts: userId } }
+        : { $addToSet: { reposts: userId } },
     );
     const post = await db.collection('community_posts').findOne({ id: request.params.postId });
-    response.json({ reposts: Array.isArray(post?.reposts) ? post.reposts.length : 0 });
+    response.json({
+      reposted: !reposted,
+      reposts: Array.isArray(post?.reposts) ? post.reposts.length : 0,
+    });
   } catch (error) {
     next(error);
   }
