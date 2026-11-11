@@ -787,4 +787,52 @@ router.post('/:userId/posts', postUpload.single('image'), async (request, respon
   }
 });
 
+router.delete('/posts/:postId', async (request, response, next) => {
+  try {
+    const userId = typeof request.body?.userId === 'string'
+      ? request.body.userId.trim()
+      : '';
+    if (!userId) {
+      response.status(400).json({ message: 'Falta el usuario' });
+      return;
+    }
+
+    const db = await connectMongo();
+    const post = await db.collection('community_posts').findOne({
+      id: request.params.postId,
+    });
+    if (!post) {
+      response.status(404).json({ message: 'Publicación no encontrada' });
+      return;
+    }
+    if (post.userId !== userId) {
+      response.status(403).json({ message: 'No puedes eliminar esta publicación' });
+      return;
+    }
+
+    const bucket = new GridFSBucket(db, { bucketName: 'post_media' });
+    const mediaFiles = await db
+      .collection('post_media.files')
+      .find({ 'metadata.postId': request.params.postId })
+      .project({ _id: 1 })
+      .toArray();
+
+    await Promise.all([
+      ...mediaFiles.map(({ _id }) => bucket.delete(_id).catch(() => undefined)),
+      db.collection('community_posts').deleteOne({
+        id: request.params.postId,
+        userId,
+      }),
+      db.collection('pilot_profiles').updateOne(
+        { userId },
+        { $pull: { posts: { id: request.params.postId } } } as any,
+      ),
+    ]);
+
+    response.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
 export const profilesRouter = router;

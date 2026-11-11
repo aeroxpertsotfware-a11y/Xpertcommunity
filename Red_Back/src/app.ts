@@ -1,6 +1,8 @@
 import express from 'express';
 import multer from 'multer';
 import { profilesRouter } from './routes/profiles.js';
+import { hangarRouter } from './routes/hangar.js';
+import { careerRouter } from './routes/career.js';
 
 export function createApp() {
   const app = express();
@@ -10,6 +12,8 @@ export function createApp() {
     response.json({ status: 'ok' });
   });
   app.use('/api/profiles', profilesRouter);
+  app.use('/api/hangar', hangarRouter);
+  app.use('/api/career', careerRouter);
   app.use((error: unknown, request: express.Request, response: express.Response, _next: express.NextFunction) => {
     if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
       const limit = request.path.includes('/story')
