@@ -17,7 +17,7 @@ async function googleWeather(path: string, latitude: number, longitude: number) 
     unitsSystem: 'METRIC',
     languageCode: 'es',
   });
-  if (path.includes('/hours:')) query.set('hours', '6');
+  if (path.includes('/hours:')) query.set('hours', '8');
   const response = await fetch(`https://weather.googleapis.com/v1/${path}?${query}`, {
     signal: AbortSignal.timeout(10_000),
   });
