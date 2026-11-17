@@ -66,9 +66,44 @@ function validRole(value: unknown): value is CareerRole {
   return typeof value === 'string' && value in roles;
 }
 
+function normalizedApplication(application: Record<string, any>, role: CareerRole) {
+  const documents = (application.documents ?? {}) as Record<string, any>;
+  const complete = roles[role].requirements.every((item) => documents[item.id]?.fileId);
+  return {
+    ...application,
+    role,
+    status: application.status === 'submitted' && complete ? 'submitted' : 'draft',
+    documents,
+  };
+}
+
+function storedApplications(document: Record<string, any> | null) {
+  if (!document) return {} as Partial<Record<CareerRole, Record<string, any>>>;
+  const applications = { ...((document.applications ?? {}) as Record<string, any>) };
+  if (validRole(document.role) && !applications[document.role]) {
+    applications[document.role] = {
+      role: document.role,
+      status: document.status,
+      documents: document.documents ?? {},
+      notes: document.notes,
+      createdAt: document.createdAt,
+      updatedAt: document.updatedAt,
+      submittedAt: document.submittedAt,
+    };
+  }
+  return Object.fromEntries(
+    Object.entries(applications)
+      .filter(([role]) => validRole(role))
+      .map(([role, application]) => [
+        role,
+        normalizedApplication(application as Record<string, any>, role as CareerRole),
+      ]),
+  ) as Partial<Record<CareerRole, Record<string, any>>>;
+}
+
 function publicApplication(application: Record<string, any> | null) {
   if (!application) return null;
-  const { _id, documents: rawDocuments, ...safe } = application;
+  const { documents: rawDocuments, ...safe } = application;
   const documents = Object.fromEntries(
     Object.entries((rawDocuments ?? {}) as Record<string, any>).map(([key, value]) => [
       key,
@@ -80,7 +115,16 @@ function publicApplication(application: Record<string, any> | null) {
       },
     ]),
   );
-  return { ...safe, documents, id: String(_id) };
+  return { ...safe, documents };
+}
+
+function publicApplications(document: Record<string, any> | null) {
+  return Object.fromEntries(
+    Object.entries(storedApplications(document)).map(([role, application]) => [
+      role,
+      publicApplication(application ?? null),
+    ]),
+  );
 }
 
 router.use(requireFirebaseUser);
@@ -88,10 +132,10 @@ router.use(requireFirebaseUser);
 router.get('/me', async (request, response, next) => {
   try {
     const db = await connectMongo();
-    const application = await db.collection('career_applications').findOne({
+    const document = await db.collection('career_applications').findOne({
       userId: request.firebaseUserId,
     });
-    response.json({ roles: Object.values(roles), application: publicApplication(application) });
+    response.json({ roles: Object.values(roles), applications: publicApplications(document) });
   } catch (error) {
     next(error);
   }
@@ -106,13 +150,24 @@ router.put('/me', async (request, response, next) => {
     const role: CareerRole = request.body.role;
     const now = new Date();
     const db = await connectMongo();
+    const current = await db.collection('career_applications').findOne({
+      userId: request.firebaseUserId,
+    });
+    const existing = storedApplications(current)[role];
+    const application = {
+      ...(existing ?? {}),
+      role,
+      status: existing?.status ?? 'draft',
+      documents: existing?.documents ?? {},
+      notes: String(request.body?.notes ?? existing?.notes ?? '').trim().slice(0, 1000),
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    };
     await db.collection('career_applications').updateOne(
       { userId: request.firebaseUserId },
       {
         $set: {
-          role,
-          notes: String(request.body?.notes ?? '').trim().slice(0, 1000),
-          status: 'draft',
+          [`applications.${role}`]: application,
           updatedAt: now,
         },
         $setOnInsert: {
@@ -122,17 +177,20 @@ router.put('/me', async (request, response, next) => {
       },
       { upsert: true },
     );
-    const application = await db.collection('career_applications').findOne({
+    const updated = await db.collection('career_applications').findOne({
       userId: request.firebaseUserId,
     });
-    response.json({ application: publicApplication(application) });
+    response.json({
+      application: publicApplication(storedApplications(updated)[role] ?? null),
+      applications: publicApplications(updated),
+    });
   } catch (error) {
     next(error);
   }
 });
 
 router.post(
-  '/me/requirements/:requirementId/document',
+  '/me/:role/requirements/:requirementId/document',
   documentUpload.single('document'),
   async (request, response, next) => {
     try {
@@ -141,10 +199,16 @@ router.post(
         return;
       }
       const db = await connectMongo();
-      const application = await db.collection('career_applications').findOne({
+      if (!validRole(request.params.role)) {
+        response.status(400).json({ message: 'Selecciona un cargo válido.' });
+        return;
+      }
+      const role: CareerRole = request.params.role;
+      const document = await db.collection('career_applications').findOne({
         userId: request.firebaseUserId,
       });
-      if (!application || !validRole(application.role)) {
+      const application = storedApplications(document)[role];
+      if (!application) {
         response.status(400).json({ message: 'Selecciona primero el cargo profesional.' });
         return;
       }
@@ -152,7 +216,7 @@ router.post(
         response.status(409).json({ message: 'La postulación ya fue enviada.' });
         return;
       }
-      const requirement = roles[application.role].requirements.find(
+      const requirement = roles[role].requirements.find(
         (item) => item.id === request.params.requirementId,
       );
       if (!requirement) {
@@ -169,7 +233,7 @@ router.post(
             metadata: {
               userId: request.firebaseUserId,
               requirementId: requirement.id,
-              role: application.role,
+              role,
             },
           }))
           .on('error', reject)
@@ -181,14 +245,15 @@ router.post(
         { userId: request.firebaseUserId },
         {
           $set: {
-            [`documents.${requirement.id}`]: {
+            [`applications.${role}.documents.${requirement.id}`]: {
               fileId,
               name: request.file.originalname,
               contentType: request.file.mimetype,
               size: request.file.size,
               uploadedAt: now,
             },
-            status: 'draft',
+            [`applications.${role}.status`]: 'draft',
+            [`applications.${role}.updatedAt`]: now,
             updatedAt: now,
           },
         },
@@ -196,24 +261,33 @@ router.post(
       const updated = await db.collection('career_applications').findOne({
         userId: request.firebaseUserId,
       });
-      response.json({ application: publicApplication(updated) });
+      response.json({
+        application: publicApplication(storedApplications(updated)[role] ?? null),
+        applications: publicApplications(updated),
+      });
     } catch (error) {
       next(error);
     }
   },
 );
 
-router.post('/me/submit', async (request, response, next) => {
+router.post('/me/:role/submit', async (request, response, next) => {
   try {
+    if (!validRole(request.params.role)) {
+      response.status(400).json({ message: 'Selecciona un cargo válido.' });
+      return;
+    }
+    const role: CareerRole = request.params.role;
     const db = await connectMongo();
-    const application = await db.collection('career_applications').findOne({
+    const document = await db.collection('career_applications').findOne({
       userId: request.firebaseUserId,
     });
-    if (!application || !validRole(application.role)) {
+    const application = storedApplications(document)[role];
+    if (!application) {
       response.status(400).json({ message: 'Primero crea una postulación.' });
       return;
     }
-    const missing = roles[application.role].requirements.filter(
+    const missing = roles[role].requirements.filter(
       (item) => !application.documents?.[item.id]?.fileId,
     );
     if (missing.length > 0) {
@@ -226,12 +300,22 @@ router.post('/me/submit', async (request, response, next) => {
     const now = new Date();
     await db.collection('career_applications').updateOne(
       { userId: request.firebaseUserId },
-      { $set: { status: 'submitted', submittedAt: now, updatedAt: now } },
+      {
+        $set: {
+          [`applications.${role}.status`]: 'submitted',
+          [`applications.${role}.submittedAt`]: now,
+          [`applications.${role}.updatedAt`]: now,
+          updatedAt: now,
+        },
+      },
     );
     const updated = await db.collection('career_applications').findOne({
       userId: request.firebaseUserId,
     });
-    response.json({ application: publicApplication(updated) });
+    response.json({
+      application: publicApplication(storedApplications(updated)[role] ?? null),
+      applications: publicApplications(updated),
+    });
   } catch (error) {
     next(error);
   }
