@@ -1,8 +1,18 @@
 import { Router } from 'express';
+import { Readable } from 'node:stream';
+import multer from 'multer';
+import { GridFSBucket, ObjectId } from 'mongodb';
 import { connectMongo } from '../db/mongo.js';
 import { requireFirebaseUser } from '../middleware/firebaseAuth.js';
 
 const router = Router();
+const documentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_request, file, callback) => {
+    callback(null, ['application/pdf', 'image/jpeg', 'image/png'].includes(file.mimetype));
+  },
+});
 
 type CareerRole = 'piloto_uas' | 'jefe_pilotos' | 'gerente_sms';
 
@@ -58,8 +68,19 @@ function validRole(value: unknown): value is CareerRole {
 
 function publicApplication(application: Record<string, any> | null) {
   if (!application) return null;
-  const { _id, ...safe } = application;
-  return { ...safe, id: String(_id) };
+  const { _id, documents: rawDocuments, ...safe } = application;
+  const documents = Object.fromEntries(
+    Object.entries((rawDocuments ?? {}) as Record<string, any>).map(([key, value]) => [
+      key,
+      {
+        name: value?.name,
+        contentType: value?.contentType,
+        size: value?.size,
+        uploadedAt: value?.uploadedAt,
+      },
+    ]),
+  );
+  return { ...safe, documents, id: String(_id) };
 }
 
 router.use(requireFirebaseUser);
@@ -83,12 +104,6 @@ router.put('/me', async (request, response, next) => {
       return;
     }
     const role: CareerRole = request.body.role;
-    const allowedRequirements = new Set(roles[role].requirements.map((item) => item.id));
-    const checks = Object.fromEntries(
-      Object.entries(request.body?.checks ?? {})
-        .filter(([key]) => allowedRequirements.has(key))
-        .map(([key, value]) => [key, value === true]),
-    );
     const now = new Date();
     const db = await connectMongo();
     await db.collection('career_applications').updateOne(
@@ -96,8 +111,6 @@ router.put('/me', async (request, response, next) => {
       {
         $set: {
           role,
-          checks,
-          targetCompany: String(request.body?.targetCompany ?? '').trim().slice(0, 120),
           notes: String(request.body?.notes ?? '').trim().slice(0, 1000),
           status: 'draft',
           updatedAt: now,
@@ -118,6 +131,78 @@ router.put('/me', async (request, response, next) => {
   }
 });
 
+router.post(
+  '/me/requirements/:requirementId/document',
+  documentUpload.single('document'),
+  async (request, response, next) => {
+    try {
+      if (!request.file) {
+        response.status(400).json({ message: 'Adjunta un archivo PDF, JPG o PNG de máximo 10 MB.' });
+        return;
+      }
+      const db = await connectMongo();
+      const application = await db.collection('career_applications').findOne({
+        userId: request.firebaseUserId,
+      });
+      if (!application || !validRole(application.role)) {
+        response.status(400).json({ message: 'Selecciona primero el cargo profesional.' });
+        return;
+      }
+      if (application.status === 'submitted') {
+        response.status(409).json({ message: 'La postulación ya fue enviada.' });
+        return;
+      }
+      const requirement = roles[application.role].requirements.find(
+        (item) => item.id === request.params.requirementId,
+      );
+      if (!requirement) {
+        response.status(400).json({ message: 'El requisito no pertenece al cargo seleccionado.' });
+        return;
+      }
+
+      const bucket = new GridFSBucket(db, { bucketName: 'career_documents' });
+      const fileId = new ObjectId();
+      await new Promise<void>((resolve, reject) => {
+        Readable.from(request.file!.buffer)
+          .pipe(bucket.openUploadStreamWithId(fileId, request.file!.originalname, {
+            contentType: request.file!.mimetype,
+            metadata: {
+              userId: request.firebaseUserId,
+              requirementId: requirement.id,
+              role: application.role,
+            },
+          }))
+          .on('error', reject)
+          .on('finish', () => resolve());
+      });
+
+      const now = new Date();
+      await db.collection('career_applications').updateOne(
+        { userId: request.firebaseUserId },
+        {
+          $set: {
+            [`documents.${requirement.id}`]: {
+              fileId,
+              name: request.file.originalname,
+              contentType: request.file.mimetype,
+              size: request.file.size,
+              uploadedAt: now,
+            },
+            status: 'draft',
+            updatedAt: now,
+          },
+        },
+      );
+      const updated = await db.collection('career_applications').findOne({
+        userId: request.firebaseUserId,
+      });
+      response.json({ application: publicApplication(updated) });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
 router.post('/me/submit', async (request, response, next) => {
   try {
     const db = await connectMongo();
@@ -129,7 +214,7 @@ router.post('/me/submit', async (request, response, next) => {
       return;
     }
     const missing = roles[application.role].requirements.filter(
-      (item) => application.checks?.[item.id] !== true,
+      (item) => !application.documents?.[item.id]?.fileId,
     );
     if (missing.length > 0) {
       response.status(400).json({
