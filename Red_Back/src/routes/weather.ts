@@ -29,6 +29,33 @@ async function googleWeather(path: string, latitude: number, longitude: number) 
   return payload;
 }
 
+async function spaceWeather() {
+  try {
+    const response = await fetch(
+      'https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json',
+      { signal: AbortSignal.timeout(8_000) },
+    );
+    if (!response.ok) return null;
+    const records = (await response.json()) as Array<{
+      time_tag?: string;
+      Kp?: number;
+      a_running?: number;
+      station_count?: number;
+    }>;
+    const latest = records.at(-1);
+    if (!latest || typeof latest.Kp !== 'number') return null;
+    return {
+      kp: latest.Kp,
+      aIndex: latest.a_running ?? null,
+      stationCount: latest.station_count ?? null,
+      observedAt: latest.time_tag ?? null,
+      source: 'NOAA SWPC',
+    };
+  } catch {
+    return null;
+  }
+}
+
 router.get('/', async (request, response, next) => {
   try {
     const latitude = coordinate(request.query.latitude, -90, 90);
@@ -47,11 +74,17 @@ router.get('/', async (request, response, next) => {
       response.json(cached.payload);
       return;
     }
-    const [current, hourly] = await Promise.all([
+    const [current, hourly, geomagnetic] = await Promise.all([
       googleWeather('currentConditions:lookup', latitude, longitude),
       googleWeather('forecast/hours:lookup', latitude, longitude),
+      spaceWeather(),
     ]);
-    const payload = { current, hourly, fetchedAt: new Date().toISOString() };
+    const payload = {
+      current,
+      hourly,
+      geomagnetic,
+      fetchedAt: new Date().toISOString(),
+    };
     cache.set(cacheKey, { expiresAt: Date.now() + 5 * 60_000, payload });
     response.json(payload);
   } catch (error) {
