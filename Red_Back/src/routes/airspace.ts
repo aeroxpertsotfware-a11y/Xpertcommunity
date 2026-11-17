@@ -106,30 +106,55 @@ router.get('/', async (request, response, next) => {
     const intersections = pointResults.flatMap((result, index) => {
       if (result.status !== 'fulfilled' || !(result.value.features?.length > 0)) return [];
       const layer = polygonLayers[index];
-      return (result.value.features as any[]).map((feature) => ({
-        layerId: layer.id,
-        title: layer.title,
-        kind: layer.kind,
-        attributes: feature.attributes ?? {},
-      }));
+      return (result.value.features as any[]).map((feature) => {
+        const attributes = feature.attributes ?? {};
+        const identifier =
+          attributes.DESIGNADOR_OACI ?? attributes.DESIGNADOR ?? attributes.ENTIDAD;
+        const name =
+          attributes.NOMBRE_DEL_AD ??
+          attributes.NOMBRE_DEL_EXPLOTADOR ??
+          attributes.UBICACIÓN;
+        return {
+          layerId: layer.id,
+          title: layer.title,
+          label: [layer.title, identifier, name].filter(Boolean).join(' · '),
+          kind: layer.kind,
+          attributes,
+        };
+      });
     });
 
     const kinds = new Set(intersections.map((item) => item.kind));
     let operation = 'allowed';
     let status = 'Operación abierta permitida';
+    let reason = 'Sin restricciones detectadas en esta ubicación.';
     let maxAltitudeFeet = 400;
     if (kinds.has('znvd') || kinds.has('infrastructure') || kinds.has('heliport') ||
         kinds.has('airport6') || kinds.has('aip')) {
       operation = 'prohibited';
       status = 'Operación abierta no permitida';
       maxAltitudeFeet = 0;
+      reason = intersections
+        .filter((item) =>
+          ['znvd', 'infrastructure', 'heliport', 'airport6', 'aip'].includes(item.kind),
+        )
+        .map((item) => item.label)
+        .join(' | ');
     } else if (kinds.has('airport9')) {
       operation = 'conditional';
       status = 'Operación condicionada por proximidad a aeropuerto';
       maxAltitudeFeet = 200;
+      reason = intersections
+        .filter((item) => item.kind === 'airport9')
+        .map((item) => item.label)
+        .join(' | ');
     } else if (kinds.has('sport')) {
       operation = 'caution';
       status = 'Precaución · actividad aeronáutica cercana';
+      reason = intersections
+        .filter((item) => item.kind === 'sport')
+        .map((item) => item.label)
+        .join(' | ');
     }
 
     const payload = {
@@ -137,6 +162,7 @@ router.get('/', async (request, response, next) => {
       regulation: 'RAC 100',
       operation,
       status,
+      reason,
       maxAltitudeFeet,
       maxAltitudeMeters: Math.round(maxAltitudeFeet * 0.3048),
       intersections,
