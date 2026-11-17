@@ -42,7 +42,11 @@ export async function requireFirebaseUser(
     return;
   }
   try {
-    const decoded = await getAuth().verifyIdToken(token, true);
+    // La validacion de firma, audiencia y vencimiento no necesita consultar
+    // el estado de revocacion en cada solicitud. Esa consulta adicional exige
+    // credenciales de cuenta de servicio, que no siempre estan disponibles en
+    // el entorno de despliegue.
+    const decoded = await getAuth().verifyIdToken(token);
     request.firebaseUserId = decoded.uid;
     next();
   } catch {
