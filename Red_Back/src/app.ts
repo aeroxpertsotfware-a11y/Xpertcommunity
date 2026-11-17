@@ -4,6 +4,7 @@ import { profilesRouter } from './routes/profiles.js';
 import { hangarRouter } from './routes/hangar.js';
 import { careerRouter } from './routes/career.js';
 import { weatherRouter } from './routes/weather.js';
+import { airspaceRouter } from './routes/airspace.js';
 
 export function createApp() {
   const app = express();
@@ -16,6 +17,7 @@ export function createApp() {
   app.use('/api/hangar', hangarRouter);
   app.use('/api/career', careerRouter);
   app.use('/api/weather', weatherRouter);
+  app.use('/api/airspace', airspaceRouter);
   app.use((error: unknown, request: express.Request, response: express.Response, _next: express.NextFunction) => {
     if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
       const limit = request.path.includes('/story')
