@@ -36,12 +36,16 @@ workflows:
         script: |
           flutter build ipa --release \
             --build-number="$BUILD_NUMBER" \
-            --dart-define=API_BASE_URL="$API_BASE_URL"
+            --dart-define=API_BASE_URL="$API_BASE_URL" \
+            --export-options-plist=/Users/builder/export_options.plist
+          IPA_PATH="$(find build/ios/ipa -maxdepth 1 -type f -name '*.ipa' -print -quit)"
+          test -n "$IPA_PATH" || { echo "No se genero ningun archivo IPA"; exit 1; }
+          echo "IPA generado: $IPA_PATH"
 
     artifacts:
-      - build/ios/ipa/*.ipa
-      - build/ios/archive/*.xcarchive
-      - flutter_drive.log
+      - Red_Front/build/ios/ipa/*.ipa
+      - Red_Front/build/ios/archive/*.xcarchive
+      - Red_Front/flutter_drive.log
 
     publishing:
       app_store_connect:
