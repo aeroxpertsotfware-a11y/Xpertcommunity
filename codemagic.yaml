@@ -43,9 +43,9 @@ workflows:
           echo "IPA generado: $IPA_PATH"
 
     artifacts:
-      - Red_Front/build/ios/ipa/*.ipa
-      - Red_Front/build/ios/archive/*.xcarchive
-      - Red_Front/flutter_drive.log
+      - build/ios/ipa/*.ipa
+      - build/ios/archive/*.xcarchive
+      - flutter_drive.log
 
     publishing:
       app_store_connect:
