@@ -1,1 +1,2 @@
-Red_Front/
+# Red_Front es la aplicacion Flutter publicada mediante Codemagic.
+# Sus archivos generados y secretos se excluyen en Red_Front/.gitignore.

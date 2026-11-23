@@ -1,0 +1,49 @@
+workflows:
+  xpertcommunity-ios-testflight:
+    name: XpertCommunity - iOS TestFlight
+    working_directory: Red_Front
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+
+    integrations:
+      app_store_connect: codemagic
+
+    environment:
+      groups:
+        - xpertcommunity_secrets
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.aeroxpert.xpertcommunity
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      vars:
+        API_BASE_URL: https://xpertcommunity-production.up.railway.app
+
+    scripts:
+      - name: Configurar secretos de iOS
+        script: |
+          test -n "$GOOGLE_MAPS_IOS_API_KEY" || { echo "Falta GOOGLE_MAPS_IOS_API_KEY en el grupo xpertcommunity_secrets"; exit 1; }
+          printf '// Generado por Codemagic. No subir a Git.\nGOOGLE_MAPS_IOS_API_KEY=%s\n' "$GOOGLE_MAPS_IOS_API_KEY" > ios/Flutter/Secrets.xcconfig
+
+      - name: Obtener dependencias Flutter
+        script: flutter pub get
+
+      - name: Configurar firma de Apple
+        script: xcode-project use-profiles --project ios/Runner.xcodeproj
+
+      - name: Generar IPA para App Store Connect
+        script: |
+          flutter build ipa --release \
+            --build-number="$BUILD_NUMBER" \
+            --dart-define=API_BASE_URL="$API_BASE_URL"
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - build/ios/archive/*.xcarchive
+      - flutter_drive.log
+
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: false

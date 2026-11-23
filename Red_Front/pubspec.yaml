@@ -1,0 +1,72 @@
+name: red_drones
+description: Aplicación móvil de la comunidad de drones.
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.5.0 <4.0.0'
+
+dependencies:
+  file_picker: ^13.1.0
+  firebase_auth: ^6.7.0
+  firebase_core: ^4.15.0
+  flutter:
+    sdk: flutter
+  geolocator: ^14.0.1
+  google_maps_flutter: ^2.19.0
+  google_sign_in: ^7.2.0
+  http: ^1.6.0
+  http_parser: ^4.1.2
+  phosphor_icons: 3.0.1
+  shared_preferences: ^2.5.5
+  toastification: ^3.2.0
+  uuid: ^4.6.0
+  video_player: ^2.14.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/logo.png
+    - assets/images/XpertCommunity.png
+    - assets/images/google_logo.png
+    - assets/images/preflight_drone.png
+    - assets/dji consumer/drone_air_3s.png
+    - assets/images/drone_mavic_3.png
+    - assets/images/LoginXpert.png
+  fonts:
+    - family: CoHeadline
+      fonts:
+        - asset: assets/fonts/CoHeadline-Light.ttf
+          weight: 300
+        - asset: assets/fonts/CoHeadline-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/CoHeadline-Bold.ttf
+          weight: 700
+    - family: Nunito
+      fonts:
+        - asset: assets/fonts/Nunito-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/Nunito-Italic.ttf
+          weight: 400
+          style: italic
+        - asset: assets/fonts/Nunito-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/Nunito-Bold.ttf
+          weight: 700
+    - family: Lexend
+      fonts:
+        - asset: assets/fonts/Lexend-Variable.ttf
+          weight: 100
+        - asset: assets/fonts/Lexend-Variable.ttf
+          weight: 900
+    - family: Montserrat
+      fonts:
+        - asset: assets/fonts/Montserrat-Variable.ttf
+          weight: 100
+        - asset: assets/fonts/Montserrat-Variable.ttf
+          weight: 900

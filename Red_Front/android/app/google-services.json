@@ -1,0 +1,54 @@
+{
+  "project_info": {
+    "project_number": "7198485909",
+    "project_id": "xpertcommunity",
+    "storage_bucket": "xpertcommunity.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:7198485909:android:f03a9012da566564a05a9c",
+        "android_client_info": {
+          "package_name": "com.aeroxpert.xpertcommunity"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "7198485909-h9ga03e1fhn2351ugoid6svhkoak0m05.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.aeroxpert.xpertcommunity",
+            "certificate_hash": "50d106add0eb1b31ee172cf7a994835fc9b38a84"
+          }
+        },
+        {
+          "client_id": "7198485909-5qn77q53r6p82amg5jes9ov3b6qqqt8d.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCECgm_Ay4DbD9SOBGN3hH1cbaYbME_abI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "7198485909-5qn77q53r6p82amg5jes9ov3b6qqqt8d.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "7198485909-9cnfvt9ies4sstrh85gm7n6f2r02r5sm.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.aeroxpert.xpertcommunity"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
