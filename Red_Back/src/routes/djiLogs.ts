@@ -90,14 +90,15 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
     const token = open(String(row.sessionToken)); const remote = await listDjiFlights(token); const bucket = new GridFSBucket(db, { bucketName: 'pilot_log_files' });
     const logs = db.collection('pilot_flight_logs');
     const stored = await logs
-      .find({ ownerId, source: 'dji_cloud' }, { projection: { id: 1, externalId: 1, fileId: 1, metadataSource: 1 } })
+      .find({ ownerId, source: 'dji_cloud' }, { projection: { id: 1, externalId: 1, fileId: 1, metadataSource: 1, parserVersion: 1 } })
       .toArray();
-    const storedByExternalId = new Map<string, { id: string; fileId: unknown; metadataSource?: string }>(
-      stored.map((item) => [String(item.externalId), { id: String(item.id), fileId: item.fileId, metadataSource: String(item.metadataSource ?? '') }]),
+    const storedByExternalId = new Map<string, { id: string; fileId: unknown; metadataSource?: string; parserVersion?: number }>(
+      stored.map((item) => [String(item.externalId), { id: String(item.id), fileId: item.fileId, metadataSource: String(item.metadataSource ?? ''), parserVersion: Number(item.parserVersion ?? 0) }]),
     );
     let added = 0;
     let downloaded = 0;
     let failed = 0;
+    const downloadErrors: string[] = [];
     for (const item of remote) {
       const flight = flattenFlight(item);
       const storedFlight = storedByExternalId.get(flight.externalId);
@@ -108,13 +109,13 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
         );
       }
       if (storedFlight?.fileId) {
-        if (storedFlight.metadataSource !== 'flight_log') {
+        if (storedFlight.metadataSource !== 'flight_log' || storedFlight.parserVersion !== 2) {
           const storedBuffer = await readStoredLog(bucket, storedFlight.fileId);
           const parsed = parseDjiFlightLog(storedBuffer);
           if (parsed) {
             await logs.updateOne(
               { ownerId, id: storedFlight.id },
-              { $set: { ...parsed, metadataSource: 'flight_log', ...(parsed.aircraftSerial ? { aircraftId: parsed.aircraftSerial } : {}) } },
+              { $set: { ...parsed, metadataSource: 'flight_log', parserVersion: 2, ...(parsed.aircraftSerial ? { aircraftId: parsed.aircraftSerial } : {}) } },
             );
           }
         }
@@ -135,7 +136,7 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
           ...flight,
           addedAt: new Date(),
         });
-        storedByExternalId.set(flight.externalId, { id, fileId: null, metadataSource: 'dji_cloud' });
+        storedByExternalId.set(flight.externalId, { id, fileId: null, metadataSource: 'dji_cloud', parserVersion: 0 });
         added += 1;
       }
       try {
@@ -151,6 +152,7 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
               downloadStatus: 'completed',
               downloadedAt: new Date(),
               metadataSource: parsed ? 'flight_log' : 'dji_cloud',
+              parserVersion: parsed ? 2 : 0,
               ...(parsed ?? {}),
               ...(parsed?.aircraftSerial ? { aircraftId: parsed.aircraftSerial } : {}),
             },
@@ -160,15 +162,22 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
         downloaded += 1;
       } catch (downloadError) {
         failed += 1;
+        const downloadMessage = downloadError instanceof Error
+          ? downloadError.message
+          : 'No fue posible descargar el log';
+        downloadErrors.push(downloadMessage);
         await logs.updateOne(
           { ownerId, id },
-          { $set: { downloadStatus: 'failed', downloadError: downloadError instanceof Error ? downloadError.message : 'No fue posible descargar el log' } },
+          { $set: { downloadStatus: 'failed', downloadError: downloadMessage } },
         );
       }
     }
-    const lastError = failed ? `${failed} log(s) no se pudieron descargar; puedes reintentar la sincronización` : '';
+    const uniqueErrors = [...new Set(downloadErrors)];
+    const lastError = failed
+      ? `${failed} log(s) pendientes: ${uniqueErrors.slice(0, 2).join(' · ')}`
+      : '';
     await connections.updateOne({ ownerId }, { $set: { syncing: false, lastSyncAt: new Date(), lastError }, $unset: { syncStartedAt: '' } });
-    response.json({ ok: true, detected: remote.length, added, downloaded, failed, message: lastError });
+    response.json({ ok: true, detected: remote.length, added, downloaded, failed, message: lastError, errors: uniqueErrors });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'No fue posible sincronizar con DJI';
     const sessionExpired = /sesión DJI venció|token.*(?:inválido|vencido|expired|invalid)/i.test(message);

@@ -38,11 +38,27 @@ export type ParsedDjiFlightLog = {
   aircraftModel?: string;
   aircraftSerial?: string;
   flownAt?: string;
+  route?: Array<{ lat: number; lon: number; alt?: number }>;
 };
+
+function coordinate(value: unknown) {
+  const parsed = finite(value);
+  if (parsed == null) return undefined;
+  return Math.abs(parsed) <= Math.PI + 0.0001
+    ? parsed * 180 / Math.PI
+    : parsed;
+}
+
+function downsample<T>(values: T[], maximum = 600) {
+  if (values.length <= maximum) return values;
+  const step = Math.ceil(values.length / maximum);
+  return values.filter((_, index) => index % step === 0 || index === values.length - 1);
+}
 
 export function parseDjiFlightLog(buffer: Buffer): ParsedDjiFlightLog | null {
   const parser = new DJIParser();
   const result: ParsedDjiFlightLog = {};
+  const route: Array<{ lat: number; lon: number; alt?: number }> = [];
 
   const readIdentity = (record: unknown) => {
     const name = String(call(record, 'getAircraftName') ?? '').trim();
@@ -65,11 +81,23 @@ export function parseDjiFlightLog(buffer: Buffer): ParsedDjiFlightLog | null {
     if (updateTime) result.flownAt = String(updateTime);
   });
   parser.on('RECOVER', readIdentity);
+  parser.on('OSD', (record) => {
+    const lat = coordinate(call(record, 'getLatitude'));
+    const lon = coordinate(call(record, 'getLongitude'));
+    const alt = finite(call(record, 'getHeight'));
+    if (lat == null || lon == null || Math.abs(lat) > 90 || Math.abs(lon) > 180 ||
+        (Math.abs(lat) < 0.000001 && Math.abs(lon) < 0.000001)) return;
+    const previous = route.at(-1);
+    if (previous && Math.abs(previous.lat - lat) < 0.0000001 &&
+        Math.abs(previous.lon - lon) < 0.0000001) return;
+    route.push({ lat, lon, ...(alt != null ? { alt } : {}) });
+  });
 
   try {
     parser.parse(buffer);
   } catch {
     return null;
   }
+  if (route.length) result.route = downsample(route);
   return Object.keys(result).length ? result : null;
 }

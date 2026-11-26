@@ -13,7 +13,14 @@ async function djiFetch(url: string, init: RequestInit = {}, timeout = 45_000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    return await fetch(url, {
+      ...init,
+      headers: {
+        'User-Agent': 'DJICloudResearchClient/1.0',
+        ...(init.headers as Record<string, string> | undefined),
+      },
+      signal: controller.signal,
+    });
   } catch (error) {
     if ((error as Error).name === 'AbortError') throw new Error('DJI no respondió a tiempo');
     throw error;
@@ -54,6 +61,8 @@ function objects(value: unknown, output: Record<string, unknown>[] = []) {
 
 function check(response: Response, payload?: Record<string, unknown>) {
   if (response.status === 401 || response.status === 403) throw new Error('La sesión DJI venció');
+  if (response.status === 429) throw new Error('DJI limitó temporalmente las solicitudes; intenta nuevamente en unos minutos');
+  if (response.status === 451) throw new Error('DJI bloqueó la descarga desde la ubicación o red del servidor (HTTP 451)');
   if (!response.ok) throw new Error(`DJI respondió con estado ${response.status}`);
   const code = String(payload?.code ?? payload?.Code ?? '0');
   if (code !== '0' && code !== '200') {
@@ -140,14 +149,42 @@ export async function listDjiFlights(token: string) {
 }
 
 export async function downloadDjiFlight(token: string, filename: string) {
-  const url = new URL(`${flightBase}/zipdownload`);
+  if (!filename.trim()) throw new Error('El registro DJI no contiene nombre de archivo');
+  let url = new URL(`${flightBase}/zipdownload`);
   url.searchParams.set('token', token);
   url.searchParams.set('filename', filename);
-  const response = await djiFetch(url.toString(), {}, 120_000);
-  check(response);
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (!buffer.length || buffer.length > 512 * 1024 * 1024) throw new Error('El archivo DJI está vacío o excede 512 MB');
-  return extractFlightLog(buffer);
+  for (let hop = 0; hop <= 10; hop += 1) {
+    const response = await djiFetch(url.toString(), { redirect: 'manual' }, 120_000);
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers.get('location');
+      if (!location || hop === 10) throw new Error('La descarga DJI excedió el límite de redirecciones');
+      const next = new URL(location, url);
+      if (!trustedDownloadUrl(next)) throw new Error('DJI redirigió la descarga a un servidor no autorizado');
+      url = next;
+      continue;
+    }
+    const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
+    if (contentType.includes('json')) {
+      const payload = await response.json() as Record<string, unknown>;
+      check(response, payload);
+      throw new Error(String(payload.message ?? payload.Message ?? payload.msg ?? 'DJI devolvió una respuesta JSON en lugar del log'));
+    }
+    check(response);
+    const declaredSize = Number(response.headers.get('content-length') ?? 0);
+    if (declaredSize > maxFlightBytes) throw new Error('El log DJI supera el límite de 512 MB');
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (!buffer.length || buffer.length > maxFlightBytes) throw new Error('El archivo DJI está vacío o excede 512 MB');
+    return extractFlightLog(buffer);
+  }
+  throw new Error('No fue posible completar la descarga DJI');
+}
+
+function trustedDownloadUrl(url: URL) {
+  const host = url.hostname.toLowerCase();
+  return url.protocol === 'https:' && (!url.port || url.port === '443') &&
+    !url.username && !url.password &&
+    ['dji.com', 'djicdn.com', 'djistatic.com', 'amazonaws.com']
+      .some((root) => host === root || host.endsWith(`.${root}`));
 }
 
 function safeZipEntry(file: UnzipFileInfo) {
