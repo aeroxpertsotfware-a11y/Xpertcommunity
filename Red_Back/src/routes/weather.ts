@@ -56,6 +56,47 @@ async function spaceWeather() {
   }
 }
 
+async function locationName(latitude: number, longitude: number) {
+  try {
+    const query = new URLSearchParams({
+      latlng: `${latitude},${longitude}`,
+      key: env.googleWeatherApiKey,
+      language: 'es',
+    });
+    const result = await fetch(
+      `https://maps.googleapis.com/maps/api/geocode/json?${query}`,
+      { signal: AbortSignal.timeout(8_000) },
+    );
+    if (!result.ok) return null;
+    const payload = (await result.json()) as {
+      status?: string;
+      results?: Array<{
+        address_components?: Array<{
+          long_name?: string;
+          types?: string[];
+        }>;
+      }>;
+    };
+    if (payload.status !== 'OK') return null;
+    const components = payload.results?.flatMap(
+      (item) => item.address_components ?? [],
+    ) ?? [];
+    const preferredTypes = [
+      'locality',
+      'administrative_area_level_2',
+      'sublocality',
+      'administrative_area_level_1',
+    ];
+    for (const type of preferredTypes) {
+      const match = components.find((item) => item.types?.includes(type));
+      if (match?.long_name) return match.long_name;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 router.get('/', async (request, response, next) => {
   try {
     const latitude = coordinate(request.query.latitude, -90, 90);
@@ -74,15 +115,17 @@ router.get('/', async (request, response, next) => {
       response.json(cached.payload);
       return;
     }
-    const [current, hourly, geomagnetic] = await Promise.all([
+    const [current, hourly, geomagnetic, locationLabel] = await Promise.all([
       googleWeather('currentConditions:lookup', latitude, longitude),
       googleWeather('forecast/hours:lookup', latitude, longitude),
       spaceWeather(),
+      locationName(latitude, longitude),
     ]);
     const payload = {
       current,
       hourly,
       geomagnetic,
+      locationLabel,
       fetchedAt: new Date().toISOString(),
     };
     cache.set(cacheKey, { expiresAt: Date.now() + 5 * 60_000, payload });

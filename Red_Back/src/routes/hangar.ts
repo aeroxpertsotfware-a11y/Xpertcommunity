@@ -68,6 +68,11 @@ hangarRouter.get('/', async (request, response, next) => {
         name: log.name,
         size: log.size,
         addedAt: log.addedAt,
+        source: log.source,
+        flownAt: log.flownAt,
+        durationSec: log.durationSec,
+        maxAltitudeM: log.maxAltitudeM,
+        aircraftModel: log.aircraftModel,
       });
       logsByAircraft.set(key, list);
     }
@@ -76,6 +81,7 @@ hangarRouter.get('/', async (request, response, next) => {
         ...item,
         logs: logsByAircraft.get(String(item.id)) ?? [],
       })),
+      logs: logs.map(({ _id, ownerId: _ownerId, fileId: _fileId, raw: _raw, ...log }) => log),
     });
   } catch (error) {
     next(error);
