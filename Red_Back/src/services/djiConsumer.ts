@@ -211,8 +211,15 @@ export function flattenFlight(item: Record<string, unknown>) {
     distanceM: number('total_distance', 'totalDistance', 'distance'),
     maxAltitudeM: number('max_height', 'maxHeight', 'max_altitude', 'maxAltitude'),
     maxSpeedMps: number('max_speed', 'maxSpeed'),
-    aircraftSerial: String(pick('aircraft_sn', 'aircraftSn', 'drone_sn', 'droneSn', 'sn') ?? ''),
-    aircraftModel: String(pick('aircraft_name', 'aircraftName', 'product_name', 'productName', 'model') ?? 'DJI aircraft'),
+    aircraftSerial: String(pick(
+      'aircraft_sn', 'aircraftSn', 'aircraft_serial', 'aircraftSerial',
+      'drone_sn', 'droneSn', 'device_sn', 'deviceSn', 'sn',
+    ) ?? ''),
+    aircraftModel: String(pick(
+      'aircraft_name', 'aircraftName', 'drone_name', 'droneName',
+      'product_name', 'productName', 'product_type', 'productType',
+      'aircraft_type', 'aircraftType', 'model',
+    ) ?? 'DJI aircraft'),
     flownAt: pick('start_time', 'flight_start_time', 'flightTime', 'startTime', 'create_time', 'created_at', 'time') ?? null,
     raw: item,
   };

@@ -4,6 +4,7 @@ import { GridFSBucket } from 'mongodb';
 import { connectMongo } from '../db/mongo.js';
 import { requireFirebaseUser } from '../middleware/firebaseAuth.js';
 import { downloadDjiFlight, flattenFlight, listDjiFlights, loginDji, requestCaptcha, validateDjiSession } from '../services/djiConsumer.js';
+import { parseDjiFlightLog } from '../services/djiFlightLogParser.js';
 
 function cipherKey() {
   return crypto.createHash('sha256').update(process.env.DJI_SESSION_ENCRYPTION_KEY || process.env.MONGODB_URI || 'red-dji').digest();
@@ -22,6 +23,20 @@ function upload(bucket: GridFSBucket, filename: string, buffer: Buffer, metadata
   return new Promise<unknown>((resolve, reject) => {
     const stream = bucket.openUploadStream(filename, { contentType: 'text/plain', metadata });
     stream.on('error', reject); stream.on('finish', () => resolve(stream.id)); stream.end(buffer);
+  });
+}
+function readStoredLog(bucket: GridFSBucket, fileId: unknown) {
+  return new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    const stream = bucket.openDownloadStream(fileId as never);
+    stream.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > 512 * 1024 * 1024) stream.destroy(new Error('El log almacenado excede 512 MB'));
+      else chunks.push(chunk);
+    });
+    stream.on('error', reject);
+    stream.on('end', () => resolve(Buffer.concat(chunks)));
   });
 }
 
@@ -75,10 +90,10 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
     const token = open(String(row.sessionToken)); const remote = await listDjiFlights(token); const bucket = new GridFSBucket(db, { bucketName: 'pilot_log_files' });
     const logs = db.collection('pilot_flight_logs');
     const stored = await logs
-      .find({ ownerId, source: 'dji_cloud' }, { projection: { id: 1, externalId: 1, fileId: 1 } })
+      .find({ ownerId, source: 'dji_cloud' }, { projection: { id: 1, externalId: 1, fileId: 1, metadataSource: 1 } })
       .toArray();
-    const storedByExternalId = new Map<string, { id: string; fileId: unknown }>(
-      stored.map((item) => [String(item.externalId), { id: String(item.id), fileId: item.fileId }]),
+    const storedByExternalId = new Map<string, { id: string; fileId: unknown; metadataSource?: string }>(
+      stored.map((item) => [String(item.externalId), { id: String(item.id), fileId: item.fileId, metadataSource: String(item.metadataSource ?? '') }]),
     );
     let added = 0;
     let downloaded = 0;
@@ -86,7 +101,25 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
     for (const item of remote) {
       const flight = flattenFlight(item);
       const storedFlight = storedByExternalId.get(flight.externalId);
-      if (storedFlight?.fileId) continue;
+      if (storedFlight) {
+        await logs.updateOne(
+          { ownerId, id: storedFlight.id },
+          { $set: { ...flight, name: flight.filename, aircraftId: flight.aircraftSerial || 'dji' } },
+        );
+      }
+      if (storedFlight?.fileId) {
+        if (storedFlight.metadataSource !== 'flight_log') {
+          const storedBuffer = await readStoredLog(bucket, storedFlight.fileId);
+          const parsed = parseDjiFlightLog(storedBuffer);
+          if (parsed) {
+            await logs.updateOne(
+              { ownerId, id: storedFlight.id },
+              { $set: { ...parsed, metadataSource: 'flight_log', ...(parsed.aircraftSerial ? { aircraftId: parsed.aircraftSerial } : {}) } },
+            );
+          }
+        }
+        continue;
+      }
       const id = String(storedFlight?.id ?? crypto.randomUUID());
       if (!storedFlight) {
         await logs.insertOne({
@@ -102,15 +135,27 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
           ...flight,
           addedAt: new Date(),
         });
-        storedByExternalId.set(flight.externalId, { id, fileId: null });
+        storedByExternalId.set(flight.externalId, { id, fileId: null, metadataSource: 'dji_cloud' });
         added += 1;
       }
       try {
         const buffer = await downloadDjiFlight(token, flight.filename);
+        const parsed = parseDjiFlightLog(buffer);
         const fileId = await upload(bucket, flight.filename, buffer, { ownerId, logId: id, source: 'dji_cloud' });
         await logs.updateOne(
           { ownerId, id },
-          { $set: { fileId, size: buffer.length, downloadStatus: 'completed', downloadedAt: new Date() }, $unset: { downloadError: '' } },
+          {
+            $set: {
+              fileId,
+              size: buffer.length,
+              downloadStatus: 'completed',
+              downloadedAt: new Date(),
+              metadataSource: parsed ? 'flight_log' : 'dji_cloud',
+              ...(parsed ?? {}),
+              ...(parsed?.aircraftSerial ? { aircraftId: parsed.aircraftSerial } : {}),
+            },
+            $unset: { downloadError: '' },
+          },
         );
         downloaded += 1;
       } catch (downloadError) {
