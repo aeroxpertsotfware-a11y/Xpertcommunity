@@ -3,7 +3,7 @@ import { Router } from 'express';
 import { GridFSBucket } from 'mongodb';
 import { connectMongo } from '../db/mongo.js';
 import { requireFirebaseUser } from '../middleware/firebaseAuth.js';
-import { downloadDjiFlight, flattenFlight, listDjiFlights, loginDji, requestCaptcha } from '../services/djiConsumer.js';
+import { downloadDjiFlight, flattenFlight, listDjiFlights, loginDji, requestCaptcha, validateDjiSession } from '../services/djiConsumer.js';
 
 function cipherKey() {
   return crypto.createHash('sha256').update(process.env.DJI_SESSION_ENCRYPTION_KEY || process.env.MONGODB_URI || 'red-dji').digest();
@@ -50,6 +50,7 @@ djiLogsRouter.post('/connect', async (request, response, next) => {
     const db = await connectMongo(); const row = await db.collection('pilot_dji_connections').findOne({ ownerId: request.firebaseUserId! });
     if (!row?.challengeId || !row?.challengeAt || Date.now() - new Date(row.challengeAt).getTime() > 300_000) return void response.status(400).json({ message: 'Solicita un CAPTCHA nuevo' });
     const token = await loginDji(account, password, String(row.challengeId), code);
+    await validateDjiSession(token);
     await db.collection('pilot_dji_connections').updateOne({ ownerId: request.firebaseUserId! }, { $set: { account, sessionToken: seal(token), connectedAt: new Date(), lastError: '' }, $unset: { challengeId: '', challengeAt: '' } });
     response.json({ connected: true, account });
   } catch (error) { next(error); }
@@ -65,26 +66,75 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
     const db = await connectMongo(); const connections = db.collection('pilot_dji_connections');
     const row = await connections.findOne({ ownerId });
     if (!row?.sessionToken) return void response.status(409).json({ message: 'Conecta primero tu cuenta DJI' });
-    if (row.syncing) return void response.status(202).json({ message: 'La sincronización ya está en curso' });
+    const syncStartedAt = row.syncStartedAt
+      ? new Date(row.syncStartedAt).getTime()
+      : 0;
+    const syncIsFresh = row.syncing && Date.now() - syncStartedAt < 15 * 60_000;
+    if (syncIsFresh) return void response.status(202).json({ message: 'La sincronización ya está en curso' });
     await connections.updateOne({ ownerId }, { $set: { syncing: true, syncStartedAt: new Date(), lastError: '' } });
     const token = open(String(row.sessionToken)); const remote = await listDjiFlights(token); const bucket = new GridFSBucket(db, { bucketName: 'pilot_log_files' });
-    const stored = await db.collection('pilot_flight_logs')
-      .find({ ownerId, source: 'dji_cloud' }, { projection: { externalId: 1 } })
+    const logs = db.collection('pilot_flight_logs');
+    const stored = await logs
+      .find({ ownerId, source: 'dji_cloud' }, { projection: { id: 1, externalId: 1, fileId: 1 } })
       .toArray();
-    const existingIds = new Set(stored.map((item) => String(item.externalId)));
+    const storedByExternalId = new Map<string, { id: string; fileId: unknown }>(
+      stored.map((item) => [String(item.externalId), { id: String(item.id), fileId: item.fileId }]),
+    );
     let added = 0;
+    let downloaded = 0;
+    let failed = 0;
     for (const item of remote) {
       const flight = flattenFlight(item);
-      if (existingIds.has(flight.externalId)) continue;
-      const buffer = await downloadDjiFlight(token, flight.filename); const id = crypto.randomUUID(); const fileId = await upload(bucket, flight.filename, buffer, { ownerId, logId: id, source: 'dji_cloud' });
-      await db.collection('pilot_flight_logs').insertOne({ id, ownerId, aircraftId: flight.aircraftSerial || 'dji', fileId, name: flight.filename, size: buffer.length, contentType: 'text/plain', source: 'dji_cloud', ...flight, addedAt: new Date() });
-      existingIds.add(flight.externalId);
-      added += 1;
+      const storedFlight = storedByExternalId.get(flight.externalId);
+      if (storedFlight?.fileId) continue;
+      const id = String(storedFlight?.id ?? crypto.randomUUID());
+      if (!storedFlight) {
+        await logs.insertOne({
+          id,
+          ownerId,
+          aircraftId: flight.aircraftSerial || 'dji',
+          fileId: null,
+          name: flight.filename,
+          size: 0,
+          contentType: 'text/plain',
+          source: 'dji_cloud',
+          downloadStatus: 'pending',
+          ...flight,
+          addedAt: new Date(),
+        });
+        storedByExternalId.set(flight.externalId, { id, fileId: null });
+        added += 1;
+      }
+      try {
+        const buffer = await downloadDjiFlight(token, flight.filename);
+        const fileId = await upload(bucket, flight.filename, buffer, { ownerId, logId: id, source: 'dji_cloud' });
+        await logs.updateOne(
+          { ownerId, id },
+          { $set: { fileId, size: buffer.length, downloadStatus: 'completed', downloadedAt: new Date() }, $unset: { downloadError: '' } },
+        );
+        downloaded += 1;
+      } catch (downloadError) {
+        failed += 1;
+        await logs.updateOne(
+          { ownerId, id },
+          { $set: { downloadStatus: 'failed', downloadError: downloadError instanceof Error ? downloadError.message : 'No fue posible descargar el log' } },
+        );
+      }
     }
-    await connections.updateOne({ ownerId }, { $set: { syncing: false, lastSyncAt: new Date(), lastError: '' }, $unset: { syncStartedAt: '' } });
-    response.json({ ok: true, detected: remote.length, added });
+    const lastError = failed ? `${failed} log(s) no se pudieron descargar; puedes reintentar la sincronización` : '';
+    await connections.updateOne({ ownerId }, { $set: { syncing: false, lastSyncAt: new Date(), lastError }, $unset: { syncStartedAt: '' } });
+    response.json({ ok: true, detected: remote.length, added, downloaded, failed, message: lastError });
   } catch (error) {
-    const db = await connectMongo().catch(() => null); if (db) await db.collection('pilot_dji_connections').updateOne({ ownerId }, { $set: { syncing: false, lastError: (error as Error).message }, $unset: { syncStartedAt: '' } }); next(error);
+    const message = error instanceof Error ? error.message : 'No fue posible sincronizar con DJI';
+    const sessionExpired = /sesión DJI venció|token.*(?:inválido|vencido|expired|invalid)/i.test(message);
+    const db = await connectMongo().catch(() => null); if (db) await db.collection('pilot_dji_connections').updateOne(
+      { ownerId },
+      {
+        $set: { syncing: false, lastError: message },
+        $unset: { syncStartedAt: '', ...(sessionExpired ? { sessionToken: '' } : {}) },
+      },
+    );
+    response.status(502).json({ message });
   }
 });
 

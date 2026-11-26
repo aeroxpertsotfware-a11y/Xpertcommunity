@@ -101,7 +101,20 @@ function listFrom(payload: unknown) {
       if (Array.isArray(item[key])) return item[key] as Record<string, unknown>[];
     }
   }
-  return [];
+  return null;
+}
+
+export async function validateDjiSession(token: string) {
+  const url = new URL(`${flightBase}/record_info_list`);
+  url.searchParams.set('token', token);
+  url.searchParams.set('page', '1');
+  url.searchParams.set('page_size', '1');
+  const response = await djiFetch(url.toString());
+  const payload = await response.json() as Record<string, unknown>;
+  check(response, payload);
+  if (listFrom(payload) == null) {
+    throw new Error('DJI no devolvió un inventario de vuelos válido');
+  }
 }
 
 export async function listDjiFlights(token: string) {
@@ -116,6 +129,7 @@ export async function listDjiFlights(token: string) {
     const payload = await response.json() as Record<string, unknown>;
     check(response, payload);
     const batch = listFrom(payload);
+    if (batch == null) throw new Error('DJI no devolvió un inventario de vuelos válido');
     for (const item of batch) {
       const key = String(item.record_id ?? item.recordId ?? item.id ?? item.file_name ?? JSON.stringify(item));
       if (!seen.has(key)) { seen.add(key); flights.push(item); }
@@ -151,16 +165,22 @@ function extractFlightLog(buffer: Buffer) {
   let output: Uint8Array = buffer;
   if (buffer.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04])) ||
       buffer.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x05, 0x06]))) {
-    const textFiles = unzipSync(buffer, {
-      filter: (file) => safeZipEntry(file) && file.name.toLowerCase().endsWith('.txt'),
+    const files = unzipSync(buffer, {
+      filter: (file) => safeZipEntry(file),
     });
-    const entries = Object.values(textFiles);
-    if (entries.length !== 1) {
+    const entries = Object.entries(files);
+    const textEntries = entries.filter(([name]) => name.toLowerCase().endsWith('.txt'));
+    const selected = textEntries.length === 1
+      ? textEntries[0]
+      : textEntries.length === 0 && entries.length === 1
+        ? entries[0]
+        : null;
+    if (!selected) {
       throw new Error(entries.length
-        ? 'El ZIP DJI contiene varios logs TXT y no es posible elegir uno'
-        : 'El ZIP DJI no contiene un log TXT');
+        ? 'El ZIP DJI contiene varios archivos y no es posible elegir el log'
+        : 'El ZIP DJI no contiene un log de vuelo');
     }
-    [output] = entries;
+    output = selected[1];
   } else if (buffer[0] === 0x1f && buffer[1] === 0x8b) {
     output = decompressSync(buffer);
   } else if (buffer.length >= 2 && (buffer[0] & 0x0f) === 8 &&
