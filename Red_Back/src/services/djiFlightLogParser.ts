@@ -23,8 +23,10 @@ function finite(value: unknown) {
 }
 
 function identity(value: unknown, serial = false) {
-  const text = String(value ?? '').trim();
-  if (!text || text.includes('\uFFFD') || /[\u0000-\u001f\u007f]/.test(text)) return undefined;
+  // DJI usa cadenas C de ancho fijo para nombre y serial. El paquete conserva
+  // el relleno NUL; primero debemos cortar la cadena en el terminador.
+  const text = String(value ?? '').split('\0', 1)[0].trim();
+  if (!text || text.includes('\uFFFD') || /[\u0001-\u001f\u007f]/.test(text)) return undefined;
   if (serial && !/^[A-Za-z0-9._-]{4,48}$/.test(text)) return undefined;
   if (!serial && !/^[\p{L}\p{N} ._+()/-]{2,80}$/u.test(text)) return undefined;
   return text;
@@ -77,8 +79,9 @@ export function parseDjiFlightLog(buffer: Buffer): ParsedDjiFlightLog | null {
 
   const readIdentity = (record: unknown) => {
     const name = identity(call(record, 'getAircraftName'));
+    const type = identity(call(record, 'getDroneType'));
     const serial = identity(call(record, 'getAircraftSn'), true);
-    if (name) result.aircraftModel = name;
+    if (name || type) result.aircraftModel = name ?? type;
     if (serial) result.aircraftSerial = serial;
   };
 

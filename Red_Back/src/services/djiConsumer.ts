@@ -239,6 +239,14 @@ export function flattenFlight(item: Record<string, unknown>) {
   for (const object of objects(item)) for (const [key, value] of Object.entries(object)) if (typeof value !== 'object' && flat[key] == null) flat[key] = value;
   const pick = (...keys: string[]) => keys.map((key) => flat[key]).find((value) => value != null && value !== '');
   const number = (...keys: string[]) => { const value = Number(pick(...keys)); return Number.isFinite(value) ? value : 0; };
+  const identity = (value: unknown, serial = false) => {
+    const text = String(value ?? '').trim();
+    if (!text || text.includes('\uFFFD') || /[\u0000-\u001f\u007f]/.test(text)) return '';
+    const valid = serial
+      ? /^[A-Za-z0-9._-]{4,48}$/.test(text)
+      : /^[\p{L}\p{N} ._+()/-]{2,80}$/u.test(text);
+    return valid ? text : '';
+  };
   const filename = String(pick('file_name', 'filename', 'FileName', 'fileName', 'name') ?? 'DJIFlightRecord.txt');
   const id = String(pick('record_id', 'recordId', 'id', 'uuid') ?? crypto.createHash('sha256').update(filename).digest('hex'));
   return {
@@ -248,15 +256,15 @@ export function flattenFlight(item: Record<string, unknown>) {
     distanceM: number('total_distance', 'totalDistance', 'distance'),
     maxAltitudeM: number('max_height', 'maxHeight', 'max_altitude', 'maxAltitude'),
     maxSpeedMps: number('max_speed', 'maxSpeed'),
-    aircraftSerial: String(pick(
+    aircraftSerial: identity(pick(
       'aircraft_sn', 'aircraftSn', 'aircraft_serial', 'aircraftSerial',
       'drone_sn', 'droneSn', 'device_sn', 'deviceSn', 'sn',
-    ) ?? ''),
-    aircraftModel: String(pick(
+    ), true),
+    aircraftModel: identity(pick(
       'aircraft_name', 'aircraftName', 'drone_name', 'droneName',
       'product_name', 'productName', 'product_type', 'productType',
       'aircraft_type', 'aircraftType', 'model',
-    ) ?? 'DJI aircraft'),
+    )) || 'DJI sin identificar',
     flownAt: pick('start_time', 'flight_start_time', 'flightTime', 'startTime', 'create_time', 'created_at', 'time') ?? null,
     raw: item,
   };

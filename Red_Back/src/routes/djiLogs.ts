@@ -62,17 +62,18 @@ djiLogsRouter.get('/captcha', async (request, response, next) => {
 djiLogsRouter.post('/connect', async (request, response, next) => {
   try {
     const account = String(request.body?.account ?? '').trim(); const password = String(request.body?.password ?? ''); const code = String(request.body?.code ?? '');
+    const accountKey = account.toLowerCase();
     const db = await connectMongo(); const row = await db.collection('pilot_dji_connections').findOne({ ownerId: request.firebaseUserId! });
     if (!row?.challengeId || !row?.challengeAt || Date.now() - new Date(row.challengeAt).getTime() > 300_000) return void response.status(400).json({ message: 'Solicita un CAPTCHA nuevo' });
     const token = await loginDji(account, password, String(row.challengeId), code);
     await validateDjiSession(token);
-    await db.collection('pilot_dji_connections').updateOne({ ownerId: request.firebaseUserId! }, { $set: { account, sessionToken: seal(token), connectedAt: new Date(), lastError: '' }, $unset: { challengeId: '', challengeAt: '' } });
+    await db.collection('pilot_dji_connections').updateOne({ ownerId: request.firebaseUserId! }, { $set: { account, accountKey, sessionToken: seal(token), connectedAt: new Date(), lastError: '', syncing: false }, $unset: { challengeId: '', challengeAt: '', syncStartedAt: '' } });
     response.json({ connected: true, account });
   } catch (error) { next(error); }
 });
 
 djiLogsRouter.post('/disconnect', async (request, response, next) => {
-  try { const db = await connectMongo(); await db.collection('pilot_dji_connections').updateOne({ ownerId: request.firebaseUserId! }, { $unset: { sessionToken: '' }, $set: { syncing: false } }); response.status(204).end(); } catch (error) { next(error); }
+  try { const db = await connectMongo(); await db.collection('pilot_dji_connections').updateOne({ ownerId: request.firebaseUserId! }, { $unset: { sessionToken: '', account: '', accountKey: '', lastError: '', syncStartedAt: '' }, $set: { syncing: false } }); response.status(204).end(); } catch (error) { next(error); }
 });
 
 djiLogsRouter.post('/sync', async (request, response, next) => {
@@ -81,6 +82,8 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
     const db = await connectMongo(); const connections = db.collection('pilot_dji_connections');
     const row = await connections.findOne({ ownerId });
     if (!row?.sessionToken) return void response.status(409).json({ message: 'Conecta primero tu cuenta DJI' });
+    const djiAccount = String(row.accountKey ?? row.account ?? '').trim().toLowerCase();
+    if (!djiAccount) return void response.status(409).json({ message: 'La cuenta DJI conectada no es válida' });
     const syncStartedAt = row.syncStartedAt
       ? new Date(row.syncStartedAt).getTime()
       : 0;
@@ -90,7 +93,7 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
     const token = open(String(row.sessionToken)); const remote = await listDjiFlights(token); const bucket = new GridFSBucket(db, { bucketName: 'pilot_log_files' });
     const logs = db.collection('pilot_flight_logs');
     const stored = await logs
-      .find({ ownerId, source: 'dji_cloud' }, { projection: { id: 1, externalId: 1, fileId: 1, metadataSource: 1, parserVersion: 1 } })
+      .find({ ownerId, source: 'dji_cloud', djiAccount }, { projection: { id: 1, externalId: 1, fileId: 1, metadataSource: 1, parserVersion: 1 } })
       .toArray();
     const storedByExternalId = new Map<string, { id: string; fileId: unknown; metadataSource?: string; parserVersion?: number }>(
       stored.map((item) => [String(item.externalId), { id: String(item.id), fileId: item.fileId, metadataSource: String(item.metadataSource ?? ''), parserVersion: Number(item.parserVersion ?? 0) }]),
@@ -105,24 +108,31 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
       if (storedFlight) {
         await logs.updateOne(
           { ownerId, id: storedFlight.id },
-          { $set: { ...flight, name: flight.filename, aircraftId: flight.aircraftSerial || 'dji' } },
+          { $set: { ...flight, djiAccount, name: flight.filename, aircraftId: flight.aircraftSerial || 'dji' } },
         );
       }
       if (storedFlight?.fileId) {
-        if (storedFlight.metadataSource !== 'flight_log' || storedFlight.parserVersion !== 3) {
+        if (storedFlight.metadataSource !== 'flight_log' || storedFlight.parserVersion !== 4) {
           const storedBuffer = await readStoredLog(bucket, storedFlight.fileId);
           const parsed = parseDjiFlightLog(storedBuffer);
           if (parsed) {
             await logs.updateOne(
               { ownerId, id: storedFlight.id },
-              { $set: { ...parsed, metadataSource: 'flight_log', metadataValid: true, parserVersion: 3, ...(parsed.aircraftSerial ? { aircraftId: parsed.aircraftSerial } : {}) }, $unset: { decodeError: '' } },
+              { $set: { ...parsed, metadataSource: 'flight_log', metadataValid: true, parserVersion: 4, ...(parsed.aircraftSerial ? { aircraftId: parsed.aircraftSerial } : {}) }, $unset: { decodeError: '' } },
             );
           } else {
             await logs.updateOne(
               { ownerId, id: storedFlight.id },
               {
-                $set: { metadataSource: 'unsupported', metadataValid: false, parserVersion: 3, decodeError: 'El FlightRecord requiere un decodificador DJI compatible' },
-                $unset: { durationSec: '', distanceM: '', maxAltitudeM: '', maxSpeedMps: '', aircraftModel: '', aircraftSerial: '', route: '' },
+                $set: {
+                  metadataSource: 'unsupported',
+                  metadataValid: false,
+                  parserVersion: 4,
+                  decodeError: 'El FlightRecord requiere un decodificador DJI compatible',
+                  aircraftModel: flight.aircraftModel,
+                  aircraftSerial: flight.aircraftSerial,
+                },
+                $unset: { durationSec: '', distanceM: '', maxAltitudeM: '', maxSpeedMps: '', route: '' },
               },
             );
           }
@@ -134,6 +144,7 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
         await logs.insertOne({
           id,
           ownerId,
+          djiAccount,
           aircraftId: flight.aircraftSerial || 'dji',
           fileId: null,
           name: flight.filename,
@@ -161,7 +172,7 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
               downloadedAt: new Date(),
               metadataSource: parsed ? 'flight_log' : 'unsupported',
               metadataValid: Boolean(parsed),
-              parserVersion: 3,
+              parserVersion: 4,
               ...(!parsed ? { decodeError: 'El FlightRecord requiere un decodificador DJI compatible' } : {}),
               ...(parsed ?? {}),
               ...(parsed?.aircraftSerial ? { aircraftId: parsed.aircraftSerial } : {}),
@@ -204,7 +215,11 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
 
 djiLogsRouter.get('/flights', async (request, response, next) => {
   try {
-    const db = await connectMongo(); const rows = await db.collection('pilot_flight_logs').find({ ownerId: request.firebaseUserId!, source: 'dji_cloud' }).sort({ flownAt: -1, addedAt: -1 }).limit(500).toArray();
+    const db = await connectMongo();
+    const connection = await db.collection('pilot_dji_connections').findOne({ ownerId: request.firebaseUserId! });
+    const djiAccount = String(connection?.accountKey ?? connection?.account ?? '').trim().toLowerCase();
+    if (!connection?.sessionToken || !djiAccount) return void response.json({ flights: [] });
+    const rows = await db.collection('pilot_flight_logs').find({ ownerId: request.firebaseUserId!, source: 'dji_cloud', djiAccount }).sort({ flownAt: -1, addedAt: -1 }).limit(500).toArray();
     response.json({ flights: rows.map(({ _id, ownerId, fileId, raw, ...row }) => row) });
   } catch (error) { next(error); }
 });

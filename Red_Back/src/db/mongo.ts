@@ -8,6 +8,11 @@ async function initializeMongo() {
   await client.connect();
   const db = client.db(env.mongodbDbName);
   await db.command({ ping: 1 });
+  const flightLogs = db.collection('pilot_flight_logs');
+  const indexes = await flightLogs.indexes();
+  if (indexes.some((index) => index.name === 'unique_owner_dji_flight')) {
+    await flightLogs.dropIndex('unique_owner_dji_flight');
+  }
   await Promise.all([
     db.collection('pilot_profiles').createIndex(
       { userId: 1 },
@@ -21,9 +26,17 @@ async function initializeMongo() {
       { ownerId: 1, aircraftId: 1, addedAt: -1 },
       { name: 'owner_aircraft_logs' },
     ),
-    db.collection('pilot_flight_logs').createIndex(
-      { ownerId: 1, source: 1, externalId: 1 },
-      { unique: true, sparse: true, name: 'unique_owner_dji_flight' },
+    flightLogs.createIndex(
+      { ownerId: 1, source: 1, djiAccount: 1, externalId: 1 },
+      {
+        unique: true,
+        name: 'unique_owner_dji_account_flight',
+        partialFilterExpression: {
+          source: 'dji_cloud',
+          djiAccount: { $type: 'string' },
+          externalId: { $type: 'string' },
+        },
+      },
     ),
     db.collection('pilot_dji_connections').createIndex(
       { ownerId: 1 },

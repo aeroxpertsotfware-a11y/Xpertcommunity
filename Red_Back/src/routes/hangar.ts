@@ -55,9 +55,20 @@ hangarRouter.get('/', async (request, response, next) => {
   try {
     const ownerId = request.firebaseUserId!;
     const db = await connectMongo();
+    const connection = await db.collection('pilot_dji_connections').findOne({ ownerId });
+    const djiAccount = String(connection?.accountKey ?? connection?.account ?? '').trim().toLowerCase();
+    const logFilter = {
+      ownerId,
+      $or: [
+        { source: { $ne: 'dji_cloud' } },
+        ...(connection?.sessionToken && djiAccount
+          ? [{ source: 'dji_cloud', djiAccount }]
+          : []),
+      ],
+    };
     const [aircraft, logs] = await Promise.all([
       db.collection('pilot_aircraft').find({ ownerId }).sort({ createdAt: -1 }).toArray(),
-      db.collection('pilot_flight_logs').find({ ownerId }).sort({ addedAt: -1 }).toArray(),
+      db.collection('pilot_flight_logs').find(logFilter).sort({ addedAt: -1 }).toArray(),
     ]);
     const logsByAircraft = new Map<string, object[]>();
     for (const log of logs) {
