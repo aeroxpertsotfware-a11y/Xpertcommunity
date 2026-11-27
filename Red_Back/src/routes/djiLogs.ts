@@ -47,7 +47,7 @@ djiLogsRouter.get('/status', async (request, response, next) => {
   try {
     const db = await connectMongo();
     const connection = await db.collection('pilot_dji_connections').findOne({ ownerId: request.firebaseUserId! });
-    response.json({ connected: Boolean(connection?.sessionToken), account: connection?.account ?? '', lastSyncAt: connection?.lastSyncAt ?? null, syncing: Boolean(connection?.syncing), error: connection?.lastError ?? '' });
+    response.json({ connected: Boolean(connection?.sessionToken), account: connection?.account ?? '', lastSyncAt: connection?.lastSyncAt ?? null, syncing: Boolean(connection?.syncing), syncId: connection?.syncId ?? '', stage: connection?.syncStage ?? '', error: connection?.lastError ?? '' });
   } catch (error) { next(error); }
 });
 
@@ -81,7 +81,7 @@ djiLogsRouter.post('/sync/stop', async (request, response, next) => {
     const db = await connectMongo();
     await db.collection('pilot_dji_connections').updateOne(
       { ownerId: request.firebaseUserId! },
-      { $set: { syncing: false, lastError: '' }, $unset: { syncStartedAt: '', syncId: '' } },
+      { $set: { syncing: false, lastError: '' }, $unset: { syncStartedAt: '', syncId: '', syncStage: '' } },
     );
     response.status(204).end();
   } catch (error) { next(error); }
@@ -102,8 +102,10 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
     const syncIsFresh = row.syncing && Date.now() - syncStartedAt < 15 * 60_000;
     if (syncIsFresh) return void response.status(202).json({ message: 'La sincronización ya está en curso' });
     syncId = crypto.randomUUID();
-    await connections.updateOne({ ownerId }, { $set: { syncing: true, syncId, syncStartedAt: new Date(), lastError: '' } });
+    await connections.updateOne({ ownerId }, { $set: { syncing: true, syncId, syncStage: 'Consultando inventario DJI', syncStartedAt: new Date(), lastError: '' } });
+    response.status(202).json({ started: true, syncId });
     const token = open(String(row.sessionToken)); const remote = await listDjiFlights(token); const bucket = new GridFSBucket(db, { bucketName: 'pilot_log_files' });
+    await connections.updateOne({ ownerId, syncId }, { $set: { syncStage: `Procesando ${remote.length} registro(s)` } });
     const logs = db.collection('pilot_flight_logs');
     const stored = await logs
       .find({ ownerId, source: 'dji_cloud', djiAccount }, { projection: { id: 1, externalId: 1, fileId: 1, metadataSource: 1, parserVersion: 1 } })
@@ -214,8 +216,8 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
     const lastError = failed
       ? `${failed} log(s) pendientes: ${uniqueErrors.slice(0, 2).join(' · ')}`
       : '';
-    await connections.updateOne({ ownerId, syncId }, { $set: { syncing: false, lastSyncAt: new Date(), lastError }, $unset: { syncStartedAt: '', syncId: '' } });
-    response.json({ ok: true, detected: remote.length, added, downloaded, failed, message: lastError, errors: uniqueErrors });
+    await connections.updateOne({ ownerId, syncId }, { $set: { syncing: false, lastSyncAt: new Date(), lastError }, $unset: { syncStartedAt: '', syncId: '', syncStage: '' } });
+    if (!response.headersSent) response.json({ ok: true, detected: remote.length, added, downloaded, failed, message: lastError, errors: uniqueErrors });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'No fue posible sincronizar con DJI';
     const sessionExpired = /sesión DJI venció|token.*(?:inválido|vencido|expired|invalid)/i.test(message);
@@ -223,10 +225,10 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
       { ownerId, ...(syncId ? { syncId } : {}) },
       {
         $set: { syncing: false, lastError: message },
-        $unset: { syncStartedAt: '', syncId: '', ...(sessionExpired ? { sessionToken: '' } : {}) },
+        $unset: { syncStartedAt: '', syncId: '', syncStage: '', ...(sessionExpired ? { sessionToken: '' } : {}) },
       },
     );
-    response.status(502).json({ message });
+    if (!response.headersSent) response.status(502).json({ message });
   }
 });
 
