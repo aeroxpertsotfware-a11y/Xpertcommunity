@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "dji-log-parser": "^0.0.4",
+    "dji-log-parser-js": "^0.5.7",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "fflate": "^0.8.3",

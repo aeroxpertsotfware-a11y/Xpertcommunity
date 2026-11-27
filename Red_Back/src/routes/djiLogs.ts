@@ -131,13 +131,13 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
         );
       }
       if (storedFlight?.fileId) {
-        if (storedFlight.metadataSource !== 'flight_log' || storedFlight.parserVersion !== 4) {
+        if (storedFlight.metadataSource !== 'flight_log' || storedFlight.parserVersion !== 5) {
           const storedBuffer = await readStoredLog(bucket, storedFlight.fileId);
-          const parsed = parseDjiFlightLog(storedBuffer);
+          const parsed = await parseDjiFlightLog(storedBuffer);
           if (parsed) {
             await logs.updateOne(
               { ownerId, id: storedFlight.id },
-              { $set: { ...parsed, metadataSource: 'flight_log', metadataValid: true, parserVersion: 4, ...(parsed.aircraftSerial ? { aircraftId: parsed.aircraftSerial } : {}) }, $unset: { decodeError: '' } },
+              { $set: { ...parsed, metadataSource: 'flight_log', metadataValid: true, parserVersion: 5, ...(parsed.aircraftSerial ? { aircraftId: parsed.aircraftSerial } : {}) }, $unset: { decodeError: '' } },
             );
           } else {
             await logs.updateOne(
@@ -146,7 +146,7 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
                 $set: {
                   metadataSource: 'unsupported',
                   metadataValid: false,
-                  parserVersion: 4,
+                  parserVersion: 5,
                   decodeError: 'El FlightRecord requiere un decodificador DJI compatible',
                   aircraftModel: flight.aircraftModel,
                   aircraftSerial: flight.aircraftSerial,
@@ -179,7 +179,7 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
       }
       try {
         const buffer = await downloadDjiFlight(token, flight.filename);
-        const parsed = parseDjiFlightLog(buffer);
+        const parsed = await parseDjiFlightLog(buffer);
         const fileId = await upload(bucket, flight.filename, buffer, { ownerId, logId: id, source: 'dji_cloud' });
         await logs.updateOne(
           { ownerId, id },
@@ -191,7 +191,7 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
               downloadedAt: new Date(),
               metadataSource: parsed ? 'flight_log' : 'unsupported',
               metadataValid: Boolean(parsed),
-              parserVersion: 4,
+              parserVersion: 5,
               ...(!parsed ? { decodeError: 'El FlightRecord requiere un decodificador DJI compatible' } : {}),
               ...(parsed ?? {}),
               ...(parsed?.aircraftSerial ? { aircraftId: parsed.aircraftSerial } : {}),

@@ -113,6 +113,26 @@ function listFrom(payload: unknown) {
   return null;
 }
 
+function paginationFinished(payload: unknown, batchSize: number, page: number, total: number) {
+  const nested = objects(payload);
+  for (const item of nested) {
+    for (const key of ['has_more', 'hasMore']) {
+      if (typeof item[key] === 'boolean') return item[key] === false;
+    }
+    for (const key of ['total_pages', 'totalPages', 'page_count', 'pageCount']) {
+      const value = Number(item[key]);
+      if (Number.isFinite(value) && value > 0) return page >= value;
+    }
+  }
+  for (const item of nested) {
+    for (const key of ['total', 'total_count', 'totalCount']) {
+      const value = Number(item[key]);
+      if (Number.isFinite(value) && value >= 0) return total >= value;
+    }
+  }
+  return batchSize < 99;
+}
+
 export async function validateDjiSession(token: string) {
   const url = new URL(`${flightBase}/record_info_list`);
   url.searchParams.set('token', token);
@@ -129,7 +149,7 @@ export async function validateDjiSession(token: string) {
 export async function listDjiFlights(token: string) {
   const flights: Record<string, unknown>[] = [];
   const seen = new Set<string>();
-  for (let page = 1; page <= 100; page += 1) {
+  for (let page = 1; page <= 1000; page += 1) {
     const url = new URL(`${flightBase}/record_info_list`);
     url.searchParams.set('token', token);
     url.searchParams.set('page', String(page));
@@ -139,13 +159,15 @@ export async function listDjiFlights(token: string) {
     check(response, payload);
     const batch = listFrom(payload);
     if (batch == null) throw new Error('DJI no devolvió un inventario de vuelos válido');
+    let added = 0;
     for (const item of batch) {
       const key = String(item.record_id ?? item.recordId ?? item.id ?? item.file_name ?? JSON.stringify(item));
-      if (!seen.has(key)) { seen.add(key); flights.push(item); }
+      if (!seen.has(key)) { seen.add(key); flights.push(item); added += 1; }
     }
-    if (batch.length < 99) break;
+    if (paginationFinished(payload, batch.length, page, flights.length)) return flights;
+    if (added === 0) throw new Error('DJI repitió una página antes de completar el inventario');
   }
-  return flights;
+  throw new Error('El inventario DJI superó el límite de 1000 páginas');
 }
 
 export async function downloadDjiFlight(token: string, filename: string) {

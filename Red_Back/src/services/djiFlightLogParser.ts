@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import { DJILog } from 'dji-log-parser-js';
 
 const require = createRequire(import.meta.url);
 const DJIParser = require('dji-log-parser') as new () => {
@@ -72,7 +73,7 @@ function downsample<T>(values: T[], maximum = 600) {
   return values.filter((_, index) => index % step === 0 || index === values.length - 1);
 }
 
-export function parseDjiFlightLog(buffer: Buffer): ParsedDjiFlightLog | null {
+function parseLegacyDjiFlightLog(buffer: Buffer): ParsedDjiFlightLog | null {
   const parser = new DJIParser();
   const result: ParsedDjiFlightLog = {};
   const route: Array<{ lat: number; lon: number; alt?: number }> = [];
@@ -122,4 +123,57 @@ export function parseDjiFlightLog(buffer: Buffer): ParsedDjiFlightLog | null {
   const hasDuration = result.durationSec != null && result.durationSec <= 24 * 3600;
   if (!hasTrustedRoute && !(hasTrustedIdentity && hasDuration)) return null;
   return result;
+}
+
+function productName(value: unknown) {
+  if (typeof value === 'string') return value;
+  if (value && typeof value === 'object' && 'Unknown' in value) {
+    return `DJI (${String((value as { Unknown: unknown }).Unknown)})`;
+  }
+  return undefined;
+}
+
+export async function parseDjiFlightLog(buffer: Buffer): Promise<ParsedDjiFlightLog | null> {
+  try {
+    const parser = new DJILog(new Uint8Array(buffer));
+    const details = parser.details;
+    const result: ParsedDjiFlightLog = {};
+    const model = productName(details.productType) ?? identity(details.aircraftName);
+    const serial = identity(details.aircraftSn, true);
+    if (model && model !== 'None') result.aircraftModel = model;
+    if (serial) result.aircraftSerial = serial;
+    const duration = bounded(details.totalTime, 0, 24 * 3600);
+    const distance = bounded(details.totalDistance, 0, 2_000_000);
+    const altitude = bounded(details.maxHeight, -1000, 20_000);
+    const speed = bounded(details.maxHorizontalSpeed, 0, 200);
+    if (duration != null) result.durationSec = duration;
+    if (distance != null) result.distanceM = distance;
+    if (altitude != null) result.maxAltitudeM = altitude;
+    if (speed != null) result.maxSpeedMps = speed;
+    if (details.startTime) result.flownAt = details.startTime;
+
+    let frames;
+    if (parser.version >= 13) {
+      const apiKey = process.env.DJI_API_KEY?.trim();
+      if (apiKey) frames = parser.frames(await parser.fetchKeychains(apiKey));
+    } else {
+      frames = parser.frames();
+    }
+    if (frames) {
+      const route = frames.map((frame) => ({
+        lat: frame.osd.latitude,
+        lon: frame.osd.longitude,
+        alt: frame.osd.height,
+      })).filter((point) => Number.isFinite(point.lat) && Number.isFinite(point.lon) &&
+        Math.abs(point.lat) <= 90 && Math.abs(point.lon) <= 180 &&
+        (Math.abs(point.lat) > 0.000001 || Math.abs(point.lon) > 0.000001));
+      if (route.length >= 2) result.route = downsample(route);
+    }
+    parser.free();
+    return result.aircraftModel || result.aircraftSerial || result.durationSec != null || result.route
+      ? result
+      : parseLegacyDjiFlightLog(buffer);
+  } catch {
+    return parseLegacyDjiFlightLog(buffer);
+  }
 }
