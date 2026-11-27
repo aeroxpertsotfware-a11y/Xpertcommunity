@@ -109,13 +109,21 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
         );
       }
       if (storedFlight?.fileId) {
-        if (storedFlight.metadataSource !== 'flight_log' || storedFlight.parserVersion !== 2) {
+        if (storedFlight.metadataSource !== 'flight_log' || storedFlight.parserVersion !== 3) {
           const storedBuffer = await readStoredLog(bucket, storedFlight.fileId);
           const parsed = parseDjiFlightLog(storedBuffer);
           if (parsed) {
             await logs.updateOne(
               { ownerId, id: storedFlight.id },
-              { $set: { ...parsed, metadataSource: 'flight_log', parserVersion: 2, ...(parsed.aircraftSerial ? { aircraftId: parsed.aircraftSerial } : {}) } },
+              { $set: { ...parsed, metadataSource: 'flight_log', metadataValid: true, parserVersion: 3, ...(parsed.aircraftSerial ? { aircraftId: parsed.aircraftSerial } : {}) }, $unset: { decodeError: '' } },
+            );
+          } else {
+            await logs.updateOne(
+              { ownerId, id: storedFlight.id },
+              {
+                $set: { metadataSource: 'unsupported', metadataValid: false, parserVersion: 3, decodeError: 'El FlightRecord requiere un decodificador DJI compatible' },
+                $unset: { durationSec: '', distanceM: '', maxAltitudeM: '', maxSpeedMps: '', aircraftModel: '', aircraftSerial: '', route: '' },
+              },
             );
           }
         }
@@ -151,8 +159,10 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
               size: buffer.length,
               downloadStatus: 'completed',
               downloadedAt: new Date(),
-              metadataSource: parsed ? 'flight_log' : 'dji_cloud',
-              parserVersion: parsed ? 2 : 0,
+              metadataSource: parsed ? 'flight_log' : 'unsupported',
+              metadataValid: Boolean(parsed),
+              parserVersion: 3,
+              ...(!parsed ? { decodeError: 'El FlightRecord requiere un decodificador DJI compatible' } : {}),
               ...(parsed ?? {}),
               ...(parsed?.aircraftSerial ? { aircraftId: parsed.aircraftSerial } : {}),
             },

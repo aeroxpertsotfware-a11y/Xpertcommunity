@@ -22,6 +22,21 @@ function finite(value: unknown) {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function identity(value: unknown, serial = false) {
+  const text = String(value ?? '').trim();
+  if (!text || text.includes('\uFFFD') || /[\u0000-\u001f\u007f]/.test(text)) return undefined;
+  if (serial && !/^[A-Za-z0-9._-]{4,48}$/.test(text)) return undefined;
+  if (!serial && !/^[\p{L}\p{N} ._+()/-]{2,80}$/u.test(text)) return undefined;
+  return text;
+}
+
+function bounded(value: unknown, minimum: number, maximum: number) {
+  const parsed = finite(value);
+  return parsed != null && parsed >= minimum && parsed <= maximum
+    ? parsed
+    : undefined;
+}
+
 // Es la misma normalización usada por la integración DJI anterior.
 // Algunas versiones de FlightRecord entregan totalTime en milisegundos.
 function durationSeconds(value: unknown) {
@@ -61,8 +76,8 @@ export function parseDjiFlightLog(buffer: Buffer): ParsedDjiFlightLog | null {
   const route: Array<{ lat: number; lon: number; alt?: number }> = [];
 
   const readIdentity = (record: unknown) => {
-    const name = String(call(record, 'getAircraftName') ?? '').trim();
-    const serial = String(call(record, 'getAircraftSn') ?? '').trim();
+    const name = identity(call(record, 'getAircraftName'));
+    const serial = identity(call(record, 'getAircraftSn'), true);
     if (name) result.aircraftModel = name;
     if (serial) result.aircraftSerial = serial;
   };
@@ -70,9 +85,9 @@ export function parseDjiFlightLog(buffer: Buffer): ParsedDjiFlightLog | null {
   parser.on('DETAILS', (record) => {
     readIdentity(record);
     const duration = durationSeconds(call(record, 'getTotalTime'));
-    const distance = finite(call(record, 'getTotalDistance'));
-    const altitude = finite(call(record, 'getMaxHeight'));
-    const speed = finite(call(record, 'getMaxHSpeed'));
+    const distance = bounded(call(record, 'getTotalDistance'), 0, 2_000_000);
+    const altitude = bounded(call(record, 'getMaxHeight'), -1000, 20_000);
+    const speed = bounded(call(record, 'getMaxHSpeed'), 0, 200);
     const updateTime = call(record, 'getUpdateTime');
     if (duration != null) result.durationSec = duration;
     if (distance != null) result.distanceM = distance;
@@ -84,7 +99,7 @@ export function parseDjiFlightLog(buffer: Buffer): ParsedDjiFlightLog | null {
   parser.on('OSD', (record) => {
     const lat = coordinate(call(record, 'getLatitude'));
     const lon = coordinate(call(record, 'getLongitude'));
-    const alt = finite(call(record, 'getHeight'));
+    const alt = bounded(call(record, 'getHeight'), -1000, 20_000);
     if (lat == null || lon == null || Math.abs(lat) > 90 || Math.abs(lon) > 180 ||
         (Math.abs(lat) < 0.000001 && Math.abs(lon) < 0.000001)) return;
     const previous = route.at(-1);
@@ -98,6 +113,10 @@ export function parseDjiFlightLog(buffer: Buffer): ParsedDjiFlightLog | null {
   } catch {
     return null;
   }
-  if (route.length) result.route = downsample(route);
-  return Object.keys(result).length ? result : null;
+  if (route.length >= 2) result.route = downsample(route);
+  const hasTrustedIdentity = Boolean(result.aircraftModel || result.aircraftSerial);
+  const hasTrustedRoute = Boolean(result.route?.length && result.route.length >= 2);
+  const hasDuration = result.durationSec != null && result.durationSec <= 24 * 3600;
+  if (!hasTrustedRoute && !(hasTrustedIdentity && hasDuration)) return null;
+  return result;
 }
