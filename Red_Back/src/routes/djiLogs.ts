@@ -73,11 +73,23 @@ djiLogsRouter.post('/connect', async (request, response, next) => {
 });
 
 djiLogsRouter.post('/disconnect', async (request, response, next) => {
-  try { const db = await connectMongo(); await db.collection('pilot_dji_connections').updateOne({ ownerId: request.firebaseUserId! }, { $unset: { sessionToken: '', account: '', accountKey: '', lastError: '', syncStartedAt: '' }, $set: { syncing: false } }); response.status(204).end(); } catch (error) { next(error); }
+  try { const db = await connectMongo(); await db.collection('pilot_dji_connections').updateOne({ ownerId: request.firebaseUserId! }, { $unset: { sessionToken: '', account: '', accountKey: '', lastError: '', syncStartedAt: '', syncId: '' }, $set: { syncing: false } }); response.status(204).end(); } catch (error) { next(error); }
+});
+
+djiLogsRouter.post('/sync/stop', async (request, response, next) => {
+  try {
+    const db = await connectMongo();
+    await db.collection('pilot_dji_connections').updateOne(
+      { ownerId: request.firebaseUserId! },
+      { $set: { syncing: false, lastError: '' }, $unset: { syncStartedAt: '', syncId: '' } },
+    );
+    response.status(204).end();
+  } catch (error) { next(error); }
 });
 
 djiLogsRouter.post('/sync', async (request, response, next) => {
   const ownerId = request.firebaseUserId!;
+  let syncId = '';
   try {
     const db = await connectMongo(); const connections = db.collection('pilot_dji_connections');
     const row = await connections.findOne({ ownerId });
@@ -89,7 +101,8 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
       : 0;
     const syncIsFresh = row.syncing && Date.now() - syncStartedAt < 15 * 60_000;
     if (syncIsFresh) return void response.status(202).json({ message: 'La sincronización ya está en curso' });
-    await connections.updateOne({ ownerId }, { $set: { syncing: true, syncStartedAt: new Date(), lastError: '' } });
+    syncId = crypto.randomUUID();
+    await connections.updateOne({ ownerId }, { $set: { syncing: true, syncId, syncStartedAt: new Date(), lastError: '' } });
     const token = open(String(row.sessionToken)); const remote = await listDjiFlights(token); const bucket = new GridFSBucket(db, { bucketName: 'pilot_log_files' });
     const logs = db.collection('pilot_flight_logs');
     const stored = await logs
@@ -103,6 +116,10 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
     let failed = 0;
     const downloadErrors: string[] = [];
     for (const item of remote) {
+      const active = await connections.findOne({ ownerId }, { projection: { syncId: 1, syncing: 1 } });
+      if (!active?.syncing || active.syncId !== syncId) {
+        return void response.status(409).json({ message: 'La sincronización fue detenida' });
+      }
       const flight = flattenFlight(item);
       const storedFlight = storedByExternalId.get(flight.externalId);
       if (storedFlight) {
@@ -197,16 +214,16 @@ djiLogsRouter.post('/sync', async (request, response, next) => {
     const lastError = failed
       ? `${failed} log(s) pendientes: ${uniqueErrors.slice(0, 2).join(' · ')}`
       : '';
-    await connections.updateOne({ ownerId }, { $set: { syncing: false, lastSyncAt: new Date(), lastError }, $unset: { syncStartedAt: '' } });
+    await connections.updateOne({ ownerId, syncId }, { $set: { syncing: false, lastSyncAt: new Date(), lastError }, $unset: { syncStartedAt: '', syncId: '' } });
     response.json({ ok: true, detected: remote.length, added, downloaded, failed, message: lastError, errors: uniqueErrors });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'No fue posible sincronizar con DJI';
     const sessionExpired = /sesión DJI venció|token.*(?:inválido|vencido|expired|invalid)/i.test(message);
     const db = await connectMongo().catch(() => null); if (db) await db.collection('pilot_dji_connections').updateOne(
-      { ownerId },
+      { ownerId, ...(syncId ? { syncId } : {}) },
       {
         $set: { syncing: false, lastError: message },
-        $unset: { syncStartedAt: '', ...(sessionExpired ? { sessionToken: '' } : {}) },
+        $unset: { syncStartedAt: '', syncId: '', ...(sessionExpired ? { sessionToken: '' } : {}) },
       },
     );
     response.status(502).json({ message });
